@@ -1,0 +1,11 @@
+{
+  "DISCORD_TOKEN": "x",
+  "OPENAI_API_KEY": "x",
+  "OPENAI_API_BASE": "x",
+  "OPENAI_MODEL": "gpt-oss-120b",
+
+  "REQUEST_TIMEOUT":         50,
+  "MAX_MSG":                 1900, 
+  "MEMORY_MAX_PER_USER":     100,
+  "MEMORY_MAX_CONTEXT_CHARS": 6000
+}
