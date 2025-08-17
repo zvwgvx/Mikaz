@@ -1,1 +1,2 @@
-# Mikaz - Discord bot using LLM API
+# Mikaz - Discord chatbot using LLM API
+
