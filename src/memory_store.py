@@ -4,8 +4,14 @@ from pathlib import Path
 from collections import deque
 from typing import Dict, List, Union, TypedDict
 
+# Đảm bảo thư mục config tồn tại - đi lên 1 cấp từ src/ rồi vào config/
+CONFIG_DIR = Path(__file__).parent.parent / "config"
+CONFIG_DIR.mkdir(exist_ok=True)  # Tạo thư mục config nếu chưa tồn tại
+
 # load_config ở nơi khác
-MEMORY_STORE, MEMORY_MAX_PER_USER, MEMORY_MAX_TOKENS = (open('config.json').read() if False else (Path('memory.json'), 50, 2000))
+MEMORY_STORE, MEMORY_MAX_PER_USER, MEMORY_MAX_TOKENS = (
+    open('config.json').read() if False else (CONFIG_DIR / 'memory.json', 50, 2000)
+)
 
 TOKENIZER = tiktoken.encoding_for_model("gpt-oss-120b")
 
@@ -16,6 +22,9 @@ class Msg(TypedDict):
 class MemoryStore:
     def __init__(self, path: Union[Path, str] = MEMORY_STORE):
         self.path = Path(path)
+        # Đảm bảo thư mục cha tồn tại
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        
         # {user_id: deque([msg, ...])}
         self._cache: Dict[int, deque[Msg]] = {}
         self._token_cnt: Dict[int, int] = {}
@@ -42,11 +51,14 @@ class MemoryStore:
 
     def _save(self) -> None:
         try:
+            # Đảm bảo thư mục tồn tại trước khi ghi
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            
             tmp = self.path.with_suffix('.tmp')
             tmp.write_text(json.dumps(
                 {str(k): list(v) for k, v in self._cache.items()},
                 indent=2
-            ), encoding="utf‑8")
+            ), encoding="utf-8")  # Sửa lỗi encoding
             tmp.replace(self.path)
         except Exception:  # pragma: no cover
             pass

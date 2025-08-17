@@ -71,10 +71,10 @@ OPENAI_API_BASE = env_data.get("OPENAI_API_BASE")
 OPENAI_MODEL = env_data.get("OPENAI_MODEL")
 
 # Tham số toàn cục
-REQUEST_TIMEOUT = _int_or_default(env_data.get("REQUEST_TIMEOUT"), 30, "REQUEST_TIMEOUT")
-MAX_MSG = _int_or_default(env_data.get("MAX_MSG"), 10, "MAX_MSG")
-MEMORY_MAX_PER_USER = _int_or_default(env_data.get("MEMORY_MAX_PER_USER"), 5, "MEMORY_MAX_PER_USER")
-MEMORY_MAX_TOKENS = _int_or_default(env_data.get("MEMORY_MAX_TOKENS"), 1500, "MEMORY_MAX_TOKENS")
+REQUEST_TIMEOUT = _int_or_default(env_data.get("REQUEST_TIMEOUT"), 100, "REQUEST_TIMEOUT")
+MAX_MSG = _int_or_default(env_data.get("MAX_MSG"), 1900, "MAX_MSG")
+MEMORY_MAX_PER_USER = _int_or_default(env_data.get("MEMORY_MAX_PER_USER"), 10, "MEMORY_MAX_PER_USER")
+MEMORY_MAX_TOKENS = _int_or_default(env_data.get("MEMORY_MAX_TOKENS"), 2500, "MEMORY_MAX_TOKENS")
 
 # --------------------------------------------------------------------
 # Mandatory checks
@@ -85,7 +85,7 @@ if DISCORD_TOKEN is None or OPENAI_API_KEY is None:
     )
 
 # Nếu bạn muốn kiểm tra thêm
-SUPPORTED_MODELS = {"gpt-3.5-turbo", "gpt-4"}
+SUPPORTED_MODELS = {"gpt-oss-20b", "gpt-oss-120b", "gpt-5", "o3-mini"}
 if OPENAI_MODEL and OPENAI_MODEL not in SUPPORTED_MODELS:
     logger.warning(f"MODEL {OPENAI_MODEL} không được liệt kê; nên giám sát sau này.")
 
