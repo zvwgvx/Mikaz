@@ -305,6 +305,285 @@ async def _process_once(message: discord.Message):
 # ------------------------------------------------------------------
 # on_message listener – central dispatch point
 # ------------------------------------------------------------------
+
+import re
+import asyncio
+import discord
+
+def split_message_smart(text: str, max_length: int = 2000) -> list[str]:
+    """
+    Chia tin nhắn một cách thông minh, tránh phá vỡ code blocks
+    """
+    if len(text) <= max_length:
+        return [text]
+    
+    chunks = []
+    current_chunk = ""
+    in_code_block = False
+    code_block_lang = ""
+    
+    lines = text.split('\n')
+    
+    for line in lines:
+        # Kiểm tra xem có phải là code block delimiter không
+        code_match = re.match(r'^```(\w*)', line.strip())
+        if code_match:
+            if not in_code_block:
+                # Bắt đầu code block
+                in_code_block = True
+                code_block_lang = code_match.group(1)
+            else:
+                # Kết thúc code block
+                in_code_block = False
+                code_block_lang = ""
+        
+        # Thêm line vào chunk hiện tại
+        test_chunk = current_chunk + ('\n' if current_chunk else '') + line
+        
+        if len(test_chunk) > max_length:
+            if current_chunk:
+                # Nếu đang trong code block, đóng nó trước khi chia
+                if in_code_block:
+                    current_chunk += '\n```'
+                    chunks.append(current_chunk)
+                    # Bắt đầu chunk mới với code block
+                    current_chunk = f'```{code_block_lang}\n{line}'
+                else:
+                    chunks.append(current_chunk)
+                    current_chunk = line
+            else:
+                # Line quá dài, cần chia nhỏ hơn
+                if len(line) > max_length:
+                    # Chia line dài thành nhiều phần
+                    while len(line) > max_length:
+                        part = line[:max_length]
+                        chunks.append(part)
+                        line = line[max_length:]
+                    if line:
+                        current_chunk = line
+                else:
+                    current_chunk = line
+        else:
+            current_chunk = test_chunk
+    
+    if current_chunk:
+        chunks.append(current_chunk)
+    
+    return chunks
+
+async def send_long_message(channel, content: str, max_msg_length: int = 2000):
+    """
+    Gửi tin nhắn dài, tự động chia nhỏ nếu cần
+    """
+    if len(content) <= max_msg_length:
+        await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
+        return
+    
+    chunks = split_message_smart(content, max_msg_length)
+    
+    for i, chunk in enumerate(chunks):
+        if i > 0:  # Thêm delay giữa các tin nhắn
+            await asyncio.sleep(0.3)
+        await channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
+
+import re
+import asyncio
+import discord
+
+def convert_latex_to_discord(text: str) -> str:
+    """
+    Chuyển đổi các ký hiệu LaTeX thành text/Unicode phù hợp với Discord
+    """
+    import re
+    
+    latex_conversions = {
+        # Math operators
+        r'\oplus': '⊕',  # XOR symbol
+        r'\neq': '≠',    # Not equal
+        r'\leq': '≤',    # Less than or equal
+        r'\geq': '≥',    # Greater than or equal
+        r'\in': '∈',     # Element of
+        r'\notin': '∉',  # Not element of
+        r'\subset': '⊂', # Subset
+        r'\supset': '⊃', # Superset
+        r'\cap': '∩',    # Intersection
+        r'\cup': '∪',    # Union
+        r'\emptyset': '∅', # Empty set
+        r'\infty': '∞',  # Infinity
+        r'\pm': '±',     # Plus minus
+        r'\times': '×',  # Times
+        r'\div': '÷',    # Division
+        r'\cdot': '·',   # Center dot
+        r'\bullet': '•', # Bullet
+        r'\circ': '∘',   # Circle operator
+        r'\ast': '∗',    # Asterisk operator
+        r'\star': '⋆',   # Star operator
+        
+        # Logic
+        r'\land': '∧',   # Logical AND
+        r'\lor': '∨',    # Logical OR
+        r'\neg': '¬',    # Logical NOT
+        r'\implies': '⇒', # Implies
+        r'\iff': '⇔',    # If and only if
+        r'\forall': '∀', # For all
+        r'\exists': '∃', # There exists
+        
+        # Greek letters (common ones)
+        r'\alpha': 'α',
+        r'\beta': 'β',
+        r'\gamma': 'γ',
+        r'\delta': 'δ',
+        r'\epsilon': 'ε',
+        r'\theta': 'θ',
+        r'\lambda': 'λ',
+        r'\mu': 'μ',
+        r'\pi': 'π',
+        r'\sigma': 'σ',
+        r'\tau': 'τ',
+        r'\phi': 'φ',
+        r'\omega': 'ω',
+        
+        # Arrows
+        r'\rightarrow': '→',
+        r'\leftarrow': '←',
+        r'\leftrightarrow': '↔',
+        r'\Rightarrow': '⇒',
+        r'\Leftarrow': '⇐',
+        r'\Leftrightarrow': '⇔',
+        
+        # Brackets and groupings
+        r'\{': '{',
+        r'\}': '}',
+        r'\langle': '⟨',
+        r'\rangle': '⟩',
+        
+        # Misc
+        r'\dots': '…',
+        r'\ldots': '…',
+        r'\cdots': '⋯',
+        r'\vdots': '⋮',
+        r'\ddots': '⋱',
+    }
+    
+    # QUAN TRỌNG: Bảo toàn line breaks và formatting
+    # Chia text thành từng dòng để xử lý riêng biệt
+    lines = text.split('\n')
+    processed_lines = []
+    
+    for line in lines:
+        # Apply LaTeX symbol conversions
+        for latex, unicode_char in latex_conversions.items():
+            line = line.replace(latex, unicode_char)
+        
+        # Convert fractions \frac{a}{b} to (a)/(b)
+        line = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', r'(\1)/(\2)', line)
+        
+        # Convert subscripts _i to ᵢ (limited support)
+        subscript_map = {'0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄', 
+                        '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉',
+                        'i': 'ᵢ', 'j': 'ⱼ', 'k': 'ₖ', 'n': 'ₙ', 'm': 'ₘ',
+                        'x': 'ₓ', 'a': 'ₐ', 'e': 'ₑ', 'o': 'ₒ', 'r': 'ᵣ', 's': 'ₛ', 't': 'ₜ'}
+        
+        # Convert simple subscripts like a_i, x_1
+        for char, sub in subscript_map.items():
+            line = re.sub(rf'([a-zA-Z])_{char}', rf'\1{sub}', line)
+        
+        # Convert superscripts ^2, ^3, etc.
+        superscript_map = {'0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴',
+                          '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
+                          'n': 'ⁿ'}
+        for char, sup in superscript_map.items():
+            line = re.sub(rf'\^{char}', sup, line)
+        
+        # Remove remaining LaTeX commands that we couldn't convert
+        line = re.sub(r'\\[a-zA-Z]+\*?', '', line)
+        
+        # Clean up multiple spaces NHƯNG GIỮ single spaces
+        line = re.sub(r' {2,}', ' ', line).strip()
+        
+        processed_lines.append(line)
+    
+    # Ghép lại các dòng với line breaks
+    result = '\n'.join(processed_lines)
+    
+    return result
+
+def split_message_smart(text: str, max_length: int = 2000) -> list[str]:
+    """
+    Chia tin nhắn một cách thông minh, tránh phá vỡ code blocks
+    """
+    if len(text) <= max_length:
+        return [text]
+    
+    chunks = []
+    current_chunk = ""
+    in_code_block = False
+    code_block_lang = ""
+    
+    lines = text.split('\n')
+    
+    for line in lines:
+        # Kiểm tra xem có phải là code block delimiter không
+        code_match = re.match(r'^```(\w*)', line.strip())
+        if code_match:
+            if not in_code_block:
+                # Bắt đầu code block
+                in_code_block = True
+                code_block_lang = code_match.group(1)
+            else:
+                # Kết thúc code block
+                in_code_block = False
+                code_block_lang = ""
+        
+        # Thêm line vào chunk hiện tại
+        test_chunk = current_chunk + ('\n' if current_chunk else '') + line
+        
+        if len(test_chunk) > max_length:
+            if current_chunk:
+                # Nếu đang trong code block, đóng nó trước khi chia
+                if in_code_block:
+                    current_chunk += '\n```'
+                    chunks.append(current_chunk)
+                    # Bắt đầu chunk mới với code block
+                    current_chunk = f'```{code_block_lang}\n{line}'
+                else:
+                    chunks.append(current_chunk)
+                    current_chunk = line
+            else:
+                # Line quá dài, cần chia nhỏ hơn
+                if len(line) > max_length:
+                    # Chia line dài thành nhiều phần
+                    while len(line) > max_length:
+                        part = line[:max_length]
+                        chunks.append(part)
+                        line = line[max_length:]
+                    if line:
+                        current_chunk = line
+                else:
+                    current_chunk = line
+        else:
+            current_chunk = test_chunk
+    
+    if current_chunk:
+        chunks.append(current_chunk)
+    
+    return chunks
+
+async def send_long_message(channel, content: str, max_msg_length: int = 2000):
+    """
+    Gửi tin nhắn dài, tự động chia nhỏ nếu cần
+    """
+    if len(content) <= max_msg_length:
+        await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
+        return
+    
+    chunks = split_message_smart(content, max_msg_length)
+    
+    for i, chunk in enumerate(chunks):
+        if i > 0:  # Thêm delay giữa các tin nhắn
+            await asyncio.sleep(0.3)
+        await channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
+
 async def on_message(message: discord.Message):
     try:
         logger.info(
@@ -412,21 +691,21 @@ async def on_message(message: discord.Message):
     reply = (resp or "").strip() or "(no response from AI)"
 
     # ------------------------------------------------------------------
+    # Convert LaTeX symbols to Discord-friendly format
+    # ------------------------------------------------------------------
+    reply = convert_latex_to_discord(reply)
+
+    # ------------------------------------------------------------------
     # Store assistant reply in memory
     # ------------------------------------------------------------------
     if _memory_store:
         _memory_store.add_message(message.author.id, {"role": "assistant", "content": reply})
 
     # ------------------------------------------------------------------
-    # Send reply to Discord
+    # Send reply to Discord (FIXED PART)
     # ------------------------------------------------------------------
     try:
-        if len(reply) <= _config.MAX_MSG:
-            await message.channel.send(reply, allowed_mentions=discord.AllowedMentions.none())
-        else:
-            for c in [reply[i:i + _config.MAX_MSG] for i in range(0, len(reply), _config.MAX_MSG)]:
-                await message.channel.send(c, allowed_mentions=discord.AllowedMentions.none())
-                await asyncio.sleep(0.2)
+        await send_long_message(message.channel, reply, _config.MAX_MSG)
     except Exception:
         logger.exception("Error sending reply to Discord")
 

@@ -1,71 +1,85 @@
-# memory_store.py (new file)
 import json
+import tiktoken
 from pathlib import Path
-from typing import Dict, List, Tuple, Any
+from collections import deque
+from typing import Dict, List, Union, TypedDict
 
-from load_config import MEMORY_STORE, MEMORY_MAX_PER_USER, MEMORY_MAX_CONTEXT_CHARS
+# load_config ở nơi khác
+MEMORY_STORE, MEMORY_MAX_PER_USER, MEMORY_MAX_TOKENS = (open('config.json').read() if False else (Path('memory.json'), 50, 2000))
 
-# Type alias
-Msg = Dict[str, str]  # {"role": "...", "content": "..."}
+TOKENIZER = tiktoken.encoding_for_model("gpt-oss-120b")
+
+class Msg(TypedDict):
+    role: str
+    content: str
 
 class MemoryStore:
-    def __init__(self, path: Path = MEMORY_STORE):
-        self.path = path
-        self._cache: Dict[int, List[Msg]] = {}  # in‑memory copy
+    def __init__(self, path: Union[Path, str] = MEMORY_STORE):
+        self.path = Path(path)
+        # {user_id: deque([msg, ...])}
+        self._cache: Dict[int, deque[Msg]] = {}
+        self._token_cnt: Dict[int, int] = {}
         self._load()
 
+    # ------------------------------------------------------------------
     def _load(self) -> None:
-        if self.path.exists():
-            try:
-                data = json.loads(self.path.read_text(encoding="utf‑8"))
-                # dict[str, list[dict]] -> dict[int, list]
-                self._cache = {int(k): v for k, v in data.items()}
-            except Exception:
-                # keep silent – the bot should still work
-                pass
+        if not self.path.exists():
+            return
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            for k, v in data.items():
+                uid = int(k)
+                # Build deque with tokens counted once
+                d = deque()
+                total_tokens = 0
+                for m in v:
+                    d.append(m)
+                    total_tokens += len(TOKENIZER.encode(m["content"]))
+                self._cache[uid] = d
+                self._token_cnt[uid] = total_tokens
+        except Exception:  # pragma: no cover
+            self._cache, self._token_cnt = {}, {}
 
     def _save(self) -> None:
         try:
-            # convert int keys back to str for JSON
-            json_data = {str(k): v for k, v in self._cache.items()}
-            self.path.write_text(json.dumps(json_data, indent=2), encoding="utf‑8")
-        except Exception:
-            # ignore file‑write failures; what matters is runtime behaviour
+            tmp = self.path.with_suffix('.tmp')
+            tmp.write_text(json.dumps(
+                {str(k): list(v) for k, v in self._cache.items()},
+                indent=2
+            ), encoding="utf‑8")
+            tmp.replace(self.path)
+        except Exception:  # pragma: no cover
             pass
 
-    # ------------------------------------------------------------------ #
-    # Public helpers
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------
     def get_user_messages(self, user_id: int) -> List[Msg]:
-        """Return the current list of messages for *user_id*."""
-        return list(self._cache.get(user_id, []))  # defensive copy
+        return list(self._cache.get(user_id, []))
 
     def add_message(self, user_id: int, msg: Msg) -> None:
-        mem = self._cache.setdefault(user_id, [])
-        mem.append(msg)
+        self._cache.setdefault(user_id, deque()).append(msg)
+
+        self._token_cnt[user_id] = self._token_cnt.get(user_id, 0) \
+                                     + len(TOKENIZER.encode(msg["content"]))
+
         self._prune(user_id)
         self._save()
 
     def clear_user(self, user_id: int) -> None:
-        if user_id in self._cache:
-            del self._cache[user_id]
-            self._save()
+        self._cache.pop(user_id, None)
+        self._token_cnt.pop(user_id, None)
+        self._save()
 
-    # ------------------------------------------------------------------ #
-    # Internal helpers
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------
     def _prune(self, user_id: int) -> None:
-        """Ensure storage limits for a single user."""
-        mem = self._cache[user_id]
+        d = self._cache[user_id]
+        token_cnt = self._token_cnt.get(user_id, 0)
 
-        # 1. Max number of messages
-        while len(mem) > MEMORY_MAX_PER_USER:
-            mem.pop(0)          # drop the oldest
+        while len(d) > MEMORY_MAX_PER_USER:
+            removed = d.popleft()
+            token_cnt -= len(TOKENIZER.encode(removed["content"]))
+            
+        while token_cnt > MEMORY_MAX_TOKENS and d:
+            removed = d.popleft()
+            token_cnt -= len(TOKENIZER.encode(removed["content"]))
 
-        # 2. Max total characters (roughly)
-        total_chars = sum(len(m["content"]) for m in mem)
-        if total_chars > MEMORY_MAX_CONTEXT_CHARS:
-            # Drop oldest until satisfy
-            while mem and total_chars > MEMORY_MAX_CONTEXT_CHARS:
-                removed = mem.pop(0)
-                total_chars -= len(removed["content"])
+        self._token_cnt[user_id] = token_cnt
