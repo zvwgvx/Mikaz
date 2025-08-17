@@ -30,6 +30,7 @@ It keeps the same logging configuration already defined in
 to start the bot from the project root.
 """
 
+
 import sys
 import os
 
@@ -44,7 +45,7 @@ if SRC_DIR not in sys.path:
 # ---------------------------------------------------------------------
 # Import the module that contains the bot and its configuration
 # ---------------------------------------------------------------------
-import main
+from src import main
 
 # ---------------------------------------------------------------------
 # Start the bot
