@@ -21,12 +21,11 @@ logging.basicConfig(
 
 logger = logging.getLogger("discord-openai-proxy.main")
 
-# Discord intents (message content intent must be enabled in Dev Portal)
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-# Create bot (we keep the "!" prefix for backward compatibility)
+
 bot = commands.Bot(command_prefix=";", intents=intents, help_command=None)
 
 # Initialize functions module: register commands/listeners and load persisted data
