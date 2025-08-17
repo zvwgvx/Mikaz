@@ -35,7 +35,7 @@ _authorized_users: Set[int] = set()
 # ---------------------------------------------------------------
 # Attachment handling constants
 # ---------------------------------------------------------------
-FILE_MAX_BYTES = 200 * 1024          # 200 KB per file
+FILE_MAX_BYTES = 200 * 1024          # 200 KB per file
 MAX_CHARS_PER_FILE = 10_000
 ALLOWED_EXTENSIONS = {
     ".txt", ".md", ".py", ".js", ".java", ".c", ".cpp", ".h",
@@ -253,8 +253,20 @@ async def listauth_cmd(ctx: commands.Context):
 
 
 async def ping_cmd(ctx: commands.Context):
-    await ctx.send("pong", allowed_mentions=discord.AllowedMentions.none())
-
+    import time
+    start_time = time.perf_counter()
+    message = await ctx.send("Pinging...", allowed_mentions=discord.AllowedMentions.none())
+    end_time = time.perf_counter()
+    
+    # Tính thời gian phản hồi (ms)
+    latency_ms = round((end_time - start_time) * 1000)
+    
+    # Lấy WebSocket latency của bot (nếu có)
+    ws_latency = round(_bot.latency * 1000) if _bot.latency else "N/A"
+    
+    # Cập nhật tin nhắn với thông tin chi tiết
+    content = f"Pong! \nResponse: {latency_ms} ms\nWebSocket: {ws_latency} ms"
+    await message.edit(content=content, allowed_mentions=discord.AllowedMentions.none())
 
 # ------------------------------------------------------------------
 # Owner‑only memory commands
@@ -291,111 +303,14 @@ async def clearmemory_cmd(ctx: commands.Context, target: discord.Member = None):
     await ctx.send(f"Cleared memory for {target}.", allowed_mentions=discord.AllowedMentions.none())
 
 # ------------------------------------------------------------------
-# Internal helper – run process_commands only once per message
+# Message formatting helpers
 # ------------------------------------------------------------------
-async def _process_once(message: discord.Message):
-    try:
-        if getattr(message, "_commands_processed_by_bot", False):
-            return
-        message._commands_processed_by_bot = True
-        await _bot.process_commands(message)
-    except Exception:
-        logger.exception("Error in _process_once while calling process_commands")
-
-# ------------------------------------------------------------------
-# on_message listener – central dispatch point
-# ------------------------------------------------------------------
-
-import re
-import asyncio
-import discord
-
-def split_message_smart(text: str, max_length: int = 2000) -> list[str]:
-    """
-    Chia tin nhắn một cách thông minh, tránh phá vỡ code blocks
-    """
-    if len(text) <= max_length:
-        return [text]
-    
-    chunks = []
-    current_chunk = ""
-    in_code_block = False
-    code_block_lang = ""
-    
-    lines = text.split('\n')
-    
-    for line in lines:
-        # Kiểm tra xem có phải là code block delimiter không
-        code_match = re.match(r'^```(\w*)', line.strip())
-        if code_match:
-            if not in_code_block:
-                # Bắt đầu code block
-                in_code_block = True
-                code_block_lang = code_match.group(1)
-            else:
-                # Kết thúc code block
-                in_code_block = False
-                code_block_lang = ""
-        
-        # Thêm line vào chunk hiện tại
-        test_chunk = current_chunk + ('\n' if current_chunk else '') + line
-        
-        if len(test_chunk) > max_length:
-            if current_chunk:
-                # Nếu đang trong code block, đóng nó trước khi chia
-                if in_code_block:
-                    current_chunk += '\n```'
-                    chunks.append(current_chunk)
-                    # Bắt đầu chunk mới với code block
-                    current_chunk = f'```{code_block_lang}\n{line}'
-                else:
-                    chunks.append(current_chunk)
-                    current_chunk = line
-            else:
-                # Line quá dài, cần chia nhỏ hơn
-                if len(line) > max_length:
-                    # Chia line dài thành nhiều phần
-                    while len(line) > max_length:
-                        part = line[:max_length]
-                        chunks.append(part)
-                        line = line[max_length:]
-                    if line:
-                        current_chunk = line
-                else:
-                    current_chunk = line
-        else:
-            current_chunk = test_chunk
-    
-    if current_chunk:
-        chunks.append(current_chunk)
-    
-    return chunks
-
-async def send_long_message(channel, content: str, max_msg_length: int = 2000):
-    """
-    Gửi tin nhắn dài, tự động chia nhỏ nếu cần
-    """
-    if len(content) <= max_msg_length:
-        await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
-        return
-    
-    chunks = split_message_smart(content, max_msg_length)
-    
-    for i, chunk in enumerate(chunks):
-        if i > 0:  # Thêm delay giữa các tin nhắn
-            await asyncio.sleep(0.3)
-        await channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
-import re
-import asyncio
-import discord
 
 def convert_latex_to_discord(text: str) -> str:
     """
     Chuyển đổi các ký hiệu LaTeX thành text/Unicode phù hợp với Discord
     FIXED: Giữ nguyên tab indentation và code formatting
     """
-    import re
-    
     latex_conversions = {
         # Math operators
         r'\oplus': '⊕',  # XOR symbol
@@ -521,6 +436,7 @@ def convert_latex_to_discord(text: str) -> str:
     
     return result
 
+
 def split_message_smart(text: str, max_length: int = 2000) -> list[str]:
     """
     Chia tin nhắn một cách thông minh, tránh phá vỡ code blocks
@@ -598,6 +514,7 @@ def split_message_smart(text: str, max_length: int = 2000) -> list[str]:
     
     return chunks
 
+
 async def send_long_message(channel, content: str, max_msg_length: int = 2000):
     """
     Gửi tin nhắn dài, tự động chia nhỏ nếu cần
@@ -613,6 +530,9 @@ async def send_long_message(channel, content: str, max_msg_length: int = 2000):
             await asyncio.sleep(0.3)
         await channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
+# ------------------------------------------------------------------
+# on_message listener – central dispatch point
+# ------------------------------------------------------------------
 async def on_message(message: discord.Message):
     try:
         logger.info(
@@ -631,17 +551,18 @@ async def on_message(message: discord.Message):
 
     content = (message.content or "").strip()
 
-    # 1️⃣ Registered commands – start with the prefix (`;`)
+    # 1️⃣ FIXED: Commands that start with prefix - DON'T manually process them here
+    # Discord.py will automatically handle them via the command framework
     if content.startswith(";"):
-        await _process_once(message)
+        # Just return, let discord.py handle the command processing
         return
 
-    # 2️⃣ Default trigger (DM or mention)
+    # 2️⃣ Default trigger (DM or mention) - for AI responses
     authorized = await is_authorized_user(message.author)
     attachments = list(message.attachments or [])
 
     if not should_respond_default(message):
-        await _process_once(message)
+        # Not a DM or mention, let discord.py process any commands if present
         return
 
     if not authorized:
@@ -649,7 +570,6 @@ async def on_message(message: discord.Message):
             await message.channel.send("You do not have permission to use this bot.", allowed_mentions=discord.AllowedMentions.none())
         except Exception:
             logger.exception("Failed to send unauthorized message")
-        await _process_once(message)
         return
 
     # ------------------------------------------------------------------
@@ -686,7 +606,6 @@ async def on_message(message: discord.Message):
             "Example: mention me and ask 'explain Dijkstra algorithm briefly'.",
             allowed_mentions=discord.AllowedMentions.none(),
         )
-        await _process_once(message)
         return
 
     # ------------------------------------------------------------------
@@ -709,12 +628,10 @@ async def on_message(message: discord.Message):
     except Exception as e:
         logger.exception("Error calling openai proxy async")
         await message.channel.send(f"Internal error: {e}", allowed_mentions=discord.AllowedMentions.none())
-        await _process_once(message)
         return
 
     if not ok:
         await message.channel.send(f"[OpenAI PROXY ERROR] {resp}", allowed_mentions=discord.AllowedMentions.none())
-        await _process_once(message)
         return
 
     reply = (resp or "").strip() or "(no response from AI)"
@@ -731,17 +648,12 @@ async def on_message(message: discord.Message):
         _memory_store.add_message(message.author.id, {"role": "assistant", "content": reply})
 
     # ------------------------------------------------------------------
-    # Send reply to Discord (FIXED PART)
+    # Send reply to Discord
     # ------------------------------------------------------------------
     try:
         await send_long_message(message.channel, reply, _config.MAX_MSG)
     except Exception:
         logger.exception("Error sending reply to Discord")
-
-    # ------------------------------------------------------------------
-    # Let other listeners (if any) process the message
-    # ------------------------------------------------------------------
-    await _process_once(message)
 
 # ------------------------------------------------------------------
 # Setup – register commands, listeners, load data
