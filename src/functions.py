@@ -385,7 +385,6 @@ async def send_long_message(channel, content: str, max_msg_length: int = 2000):
         if i > 0:  # Thêm delay giữa các tin nhắn
             await asyncio.sleep(0.3)
         await channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
-
 import re
 import asyncio
 import discord
@@ -393,6 +392,7 @@ import discord
 def convert_latex_to_discord(text: str) -> str:
     """
     Chuyển đổi các ký hiệu LaTeX thành text/Unicode phù hợp với Discord
+    FIXED: Giữ nguyên tab indentation và code formatting
     """
     import re
     
@@ -471,12 +471,22 @@ def convert_latex_to_discord(text: str) -> str:
     processed_lines = []
     
     for line in lines:
-        # Apply LaTeX symbol conversions
+        # Lưu lại leading whitespace (tabs và spaces) để bảo toàn indentation
+        leading_whitespace = ''
+        stripped_line = line
+        
+        # Tìm leading whitespace
+        match = re.match(r'^(\s*)', line)
+        if match:
+            leading_whitespace = match.group(1)
+            stripped_line = line[len(leading_whitespace):]
+        
+        # Apply LaTeX symbol conversions chỉ trên phần content (không có leading whitespace)
         for latex, unicode_char in latex_conversions.items():
-            line = line.replace(latex, unicode_char)
+            stripped_line = stripped_line.replace(latex, unicode_char)
         
         # Convert fractions \frac{a}{b} to (a)/(b)
-        line = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', r'(\1)/(\2)', line)
+        stripped_line = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', r'(\1)/(\2)', stripped_line)
         
         # Convert subscripts _i to ᵢ (limited support)
         subscript_map = {'0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄', 
@@ -486,22 +496,25 @@ def convert_latex_to_discord(text: str) -> str:
         
         # Convert simple subscripts like a_i, x_1
         for char, sub in subscript_map.items():
-            line = re.sub(rf'([a-zA-Z])_{char}', rf'\1{sub}', line)
+            stripped_line = re.sub(rf'([a-zA-Z])_{char}', rf'\1{sub}', stripped_line)
         
         # Convert superscripts ^2, ^3, etc.
         superscript_map = {'0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴',
                           '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
                           'n': 'ⁿ'}
         for char, sup in superscript_map.items():
-            line = re.sub(rf'\^{char}', sup, line)
+            stripped_line = re.sub(rf'\^{char}', sup, stripped_line)
         
         # Remove remaining LaTeX commands that we couldn't convert
-        line = re.sub(r'\\[a-zA-Z]+\*?', '', line)
+        stripped_line = re.sub(r'\\[a-zA-Z]+\*?', '', stripped_line)
         
-        # Clean up multiple spaces NHƯNG GIỮ single spaces
-        line = re.sub(r' {2,}', ' ', line).strip()
+        # Clean up multiple spaces trong content NHƯNG KHÔNG strip leading whitespace
+        # Chỉ clean up multiple spaces trong content, không làm mất indentation
+        stripped_line = re.sub(r' {2,}', ' ', stripped_line).rstrip()  # chỉ rstrip(), không strip()
         
-        processed_lines.append(line)
+        # Ghép lại leading whitespace với content đã process
+        processed_line = leading_whitespace + stripped_line
+        processed_lines.append(processed_line)
     
     # Ghép lại các dòng với line breaks
     result = '\n'.join(processed_lines)
@@ -511,6 +524,7 @@ def convert_latex_to_discord(text: str) -> str:
 def split_message_smart(text: str, max_length: int = 2000) -> list[str]:
     """
     Chia tin nhắn một cách thông minh, tránh phá vỡ code blocks
+    IMPROVED: Bảo toàn indentation khi chia tin nhắn
     """
     if len(text) <= max_length:
         return [text]
@@ -552,13 +566,28 @@ def split_message_smart(text: str, max_length: int = 2000) -> list[str]:
             else:
                 # Line quá dài, cần chia nhỏ hơn
                 if len(line) > max_length:
-                    # Chia line dài thành nhiều phần
-                    while len(line) > max_length:
-                        part = line[:max_length]
-                        chunks.append(part)
-                        line = line[max_length:]
-                    if line:
-                        current_chunk = line
+                    # Chia line dài thành nhiều phần - BẢO TOÀN indentation
+                    original_line = line
+                    leading_whitespace = ''
+                    
+                    # Lưu leading whitespace
+                    match = re.match(r'^(\s*)', original_line)
+                    if match:
+                        leading_whitespace = match.group(1)
+                        line_content = original_line[len(leading_whitespace):]
+                    else:
+                        line_content = original_line
+                    
+                    # Chia content thành các phần
+                    while len(line_content) > max_length - len(leading_whitespace):
+                        # Tính toán space available cho content
+                        available_space = max_length - len(leading_whitespace)
+                        part_content = line_content[:available_space]
+                        chunks.append(leading_whitespace + part_content)
+                        line_content = line_content[available_space:]
+                    
+                    if line_content:
+                        current_chunk = leading_whitespace + line_content
                 else:
                     current_chunk = line
         else:
