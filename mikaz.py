@@ -30,7 +30,6 @@ It keeps the same logging configuration already defined in
 to start the bot from the project root.
 """
 
-
 import sys
 import os
 
