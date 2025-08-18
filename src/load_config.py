@@ -10,8 +10,7 @@ from typing import Any, Dict
 # Logger
 # --------------------------------------------------------------------
 logger = logging.getLogger("discord-openai-proxy.config")
-# Đặt level DEBUG để debug tin tức cấu hình
-if not logger.handlers:  # tránh thêm nhiều console handler
+if not logger.handlers:
     hdlr = logging.StreamHandler()
     fmt = "%(asctime)s %(name)s %(levelname)s: %(message)s"
     hdlr.setFormatter(logging.Formatter(fmt))
@@ -35,7 +34,7 @@ USER_CONFIG_STORE = CONF_DIR / "user_config.json"  # New file for user configs
 def _load_json_file(path: Path) -> Dict[str, Any]:
     """Return an empty dict if file missing; raise warning if JSON bad."""
     if not path.exists():
-        logger.warning(f"File không tồn tại: {path}")
+        logger.warning(f"File not exists: {path}")
         return {}
     try:
         content = path.read_text(encoding="utf-8")
@@ -70,7 +69,7 @@ OPENAI_API_KEY = env_data.get("OPENAI_API_KEY")
 OPENAI_API_BASE = env_data.get("OPENAI_API_BASE")
 OPENAI_MODEL = env_data.get("OPENAI_MODEL")
 
-# Tham số toàn cục
+
 REQUEST_TIMEOUT = _int_or_default(env_data.get("REQUEST_TIMEOUT"), 100, "REQUEST_TIMEOUT")
 MAX_MSG = _int_or_default(env_data.get("MAX_MSG"), 1900, "MAX_MSG")
 MEMORY_MAX_PER_USER = _int_or_default(env_data.get("MEMORY_MAX_PER_USER"), 10, "MEMORY_MAX_PER_USER")
@@ -83,11 +82,6 @@ if DISCORD_TOKEN is None or OPENAI_API_KEY is None:
     raise RuntimeError(
         "DISCORD_TOKEN và OPENAI_API_KEY phải được khai báo trong config.json."
     )
-
-# Nếu bạn muốn kiểm tra thêm
-SUPPORTED_MODELS = {"gpt-oss-20b", "gpt-oss-120b", "gpt-5", "o3-mini", "gpt-4.1"}
-if OPENAI_MODEL and OPENAI_MODEL not in SUPPORTED_MODELS:
-    logger.warning(f"MODEL {OPENAI_MODEL} không được liệt kê; nên giám sát sau này.")
 
 # --------------------------------------------------------------------
 # System prompt loader (DEPRECATED - kept for backward compatibility)
