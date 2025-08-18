@@ -55,7 +55,9 @@ _memory_store: Optional[MemoryStore] = None
 # ------------------------------------------------------------------
 # Persistence helpers – authorized users
 # ------------------------------------------------------------------
+
 def load_authorized_from_path(path: Path) -> Set[int]:
+    """Load authorized users from file (legacy mode)"""
     if path.exists():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -64,14 +66,52 @@ def load_authorized_from_path(path: Path) -> Set[int]:
         except Exception:
             logger.exception("Failed to load authorized.json, returning empty set.")
     return set()
-
-
 def save_authorized_to_path(path: Path, s: Set[int]) -> None:
+    """Save authorized users to file (legacy mode)"""
     try:
         path.write_text(json.dumps({"authorized": sorted(list(s))}, indent=2), encoding="utf-8")
     except Exception:
         logger.exception("Failed to save authorized.json")
 
+def load_authorized_users() -> Set[int]:
+    """Load authorized users from storage backend"""
+    global _use_mongodb_auth, _mongodb_store
+    
+    if _use_mongodb_auth and _mongodb_store:
+        return _mongodb_store.get_authorized_users()
+    else:
+        return load_authorized_from_path(_config.AUTHORIZED_STORE)
+    
+def add_authorized_user(user_id: int) -> bool:
+    """Add user to authorized list"""
+    global _authorized_users, _use_mongodb_auth, _mongodb_store
+    
+    if _use_mongodb_auth and _mongodb_store:
+        success = _mongodb_store.add_authorized_user(user_id)
+        if success:
+            _authorized_users.add(user_id)
+        return success
+    else:
+        _authorized_users.add(user_id)
+        save_authorized_to_path(_config.AUTHORIZED_STORE, _authorized_users)
+        return True
+    
+def remove_authorized_user(user_id: int) -> bool:
+    """Remove user from authorized list"""
+    global _authorized_users, _use_mongodb_auth, _mongodb_store
+    
+    if _use_mongodb_auth and _mongodb_store:
+        success = _mongodb_store.remove_authorized_user(user_id)
+        if success:
+            _authorized_users.discard(user_id)
+        return success
+    else:
+        if user_id in _authorized_users:
+            _authorized_users.remove(user_id)
+            save_authorized_to_path(_config.AUTHORIZED_STORE, _authorized_users)
+            return True
+        return False
+    
 # ------------------------------------------------------------------
 # Utility helpers
 # ------------------------------------------------------------------
@@ -213,7 +253,6 @@ async def getid_cmd(ctx: commands.Context, member: discord.Member = None):
     else:
         await ctx.send(f"{member} ID: {member.id}", allowed_mentions=discord.AllowedMentions.none())
 
-
 async def addid_cmd(ctx: commands.Context, id_or_mention: str):
     global _authorized_users
     uid = _extract_user_id_from_str(id_or_mention)
@@ -225,10 +264,11 @@ async def addid_cmd(ctx: commands.Context, id_or_mention: str):
         await ctx.send(f"ID {uid} is already authorized.", allowed_mentions=discord.AllowedMentions.none())
         return
 
-    _authorized_users.add(uid)
-    save_authorized_to_path(_config.AUTHORIZED_STORE, _authorized_users)
-    await ctx.send(f"Added ID {uid} to authorized.json.", allowed_mentions=discord.AllowedMentions.none())
-
+    success = add_authorized_user(uid)
+    if success:
+        await ctx.send(f"Added ID {uid} to authorized list.", allowed_mentions=discord.AllowedMentions.none())
+    else:
+        await ctx.send(f"Failed to add ID {uid} to authorized list.", allowed_mentions=discord.AllowedMentions.none())
 
 async def removeid_cmd(ctx: commands.Context, id_or_mention: str):
     global _authorized_users
@@ -241,9 +281,11 @@ async def removeid_cmd(ctx: commands.Context, id_or_mention: str):
         await ctx.send(f"ID {uid} is not in the authorized list.", allowed_mentions=discord.AllowedMentions.none())
         return
 
-    _authorized_users.remove(uid)
-    save_authorized_to_path(_config.AUTHORIZED_STORE, _authorized_users)
-    await ctx.send(f"Removed ID {uid} from authorized.json.", allowed_mentions=discord.AllowedMentions.none())
+    success = remove_authorized_user(uid)
+    if success:
+        await ctx.send(f"Removed ID {uid} from authorized list.", allowed_mentions=discord.AllowedMentions.none())
+    else:
+        await ctx.send(f"Failed to remove ID {uid} from authorized list.", allowed_mentions=discord.AllowedMentions.none())
 
 async def listauth_cmd(ctx: commands.Context):
     if not _authorized_users:
@@ -252,14 +294,32 @@ async def listauth_cmd(ctx: commands.Context):
 
     body = "\n".join(str(x) for x in sorted(_authorized_users))
     if len(body) > 1900:
-        fp = _config.AUTHORIZED_STORE if _config.AUTHORIZED_STORE.exists() else None
-        if fp:
-            await ctx.send("List too long, sending authorized.json file.", allowed_mentions=discord.AllowedMentions.none(), file=discord.File(fp))
+        # For MongoDB mode, create a temporary text with the list
+        if _use_mongodb_auth:
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                f.write("Authorized Users:\n")
+                f.write(body)
+                temp_path = f.name
+            
+            try:
+                await ctx.send("List too long, sending as file.", 
+                             allowed_mentions=discord.AllowedMentions.none(),
+                             file=discord.File(temp_path, filename="authorized_users.txt"))
+            finally:
+                Path(temp_path).unlink(missing_ok=True)
         else:
-            await ctx.send("List too long, authorized.json not found.", allowed_mentions=discord.AllowedMentions.none())
+            # File mode - use existing file
+            fp = _config.AUTHORIZED_STORE if _config.AUTHORIZED_STORE.exists() else None
+            if fp:
+                await ctx.send("List too long, sending authorized.json file.", 
+                             allowed_mentions=discord.AllowedMentions.none(), 
+                             file=discord.File(fp))
+            else:
+                await ctx.send("List too long, authorized.json not found.", 
+                             allowed_mentions=discord.AllowedMentions.none())
     else:
         await ctx.send(f"Authorized IDs:\n{body}", allowed_mentions=discord.AllowedMentions.none())
-
 
 async def ping_cmd(ctx: commands.Context):
     import time
@@ -376,7 +436,7 @@ async def showconfig_cmd(ctx: commands.Context):
     ]
     
     await ctx.send("\n".join(lines), allowed_mentions=discord.AllowedMentions.none())
-
+    
 # ------------------------------------------------------------------
 # AI Request Processing Function (used by queue)
 # ------------------------------------------------------------------
@@ -442,15 +502,17 @@ async def process_ai_request(request):
     except Exception:
         logger.exception("Error sending reply to Discord")
 
+
 # ------------------------------------------------------------------
-# Message formatting helpers
+# Fixed Message formatting helpers with proper table handling
 # ------------------------------------------------------------------
+
 def convert_latex_to_discord(text: str) -> str:
     """
-    Alternative version with more sophisticated code detection
+    Fixed version - only protect code blocks, NOT markdown tables
     """
     
-    # Step 1: Identify and protect code regions
+    # Step 1: Only protect code regions, NOT tables
     protected_regions = []
     
     def protect_region(match):
@@ -459,10 +521,11 @@ def convert_latex_to_discord(text: str) -> str:
         protected_regions.append(content)
         return placeholder
     
-    # Protect various code patterns
+    # Only protect code-related patterns - DO NOT protect tables
     patterns_to_protect = [
         r'```[\s\S]*?```',  # Code blocks
-        r'`[^`\n]*?`',      # Inline code  
+        r'`[^`\n]*?`',      # Inline code only
+        # Programming patterns (but not tables!)
         r'#include\s*<[^>]+>', # C++ includes
         r'\b(?:cout|cin|std::)\b[^.\n]*?;',  # C++ statements
         r'\bfor\s*\([^)]*\)\s*\{[^}]*\}',   # For loops
@@ -474,9 +537,7 @@ def convert_latex_to_discord(text: str) -> str:
     for pattern in patterns_to_protect:
         working_text = re.sub(pattern, protect_region, working_text, flags=re.MULTILINE | re.DOTALL)
     
-    # Step 2: Apply LaTeX conversion to remaining text
-    # (Same LaTeX processing as above, but simplified)
-    
+    # Step 2: Apply LaTeX conversion to remaining text (including tables)
     # Simple replacements for common LaTeX symbols
     latex_replacements = {
         r'\\cdot\b': '·', r'\\times\b': '×', r'\\div\b': '÷', r'\\pm\b': '±',
@@ -509,10 +570,39 @@ def convert_latex_to_discord(text: str) -> str:
     
     return working_text
 
+def is_table_line(line: str) -> bool:
+    """Check if a line is part of a markdown table"""
+    stripped = line.strip()
+    # Table data line: starts and ends with |, has at least 2 |
+    if stripped.startswith('|') and stripped.endswith('|') and stripped.count('|') >= 2:
+        return True
+    # Table separator line: |---|---| or |:---|---:| etc
+    if (stripped.startswith('|') and 
+        all(c in '|-: \t' for c in stripped) and
+        '-' in stripped and stripped.count('|') >= 2):
+        return True
+    return False
+
+def find_complete_table(lines: list, start_idx: int) -> tuple:
+    """Find the complete table boundaries starting from any table line"""
+    if start_idx >= len(lines) or not is_table_line(lines[start_idx]):
+        return start_idx, start_idx
+    
+    # Find table start (go backwards)
+    table_start = start_idx
+    while table_start > 0 and is_table_line(lines[table_start - 1]):
+        table_start -= 1
+    
+    # Find table end (go forwards)
+    table_end = start_idx
+    while table_end < len(lines) - 1 and is_table_line(lines[table_end + 1]):
+        table_end += 1
+    
+    return table_start, table_end
+
 def split_message_smart(text: str, max_length: int = 2000) -> list[str]:
     """
-    Chia tin nhắn một cách thông minh, tránh phá vỡ code blocks
-    IMPROVED: Bảo toàn indentation khi chia tin nhắn
+    Smart message splitting that keeps tables intact
     """
     if len(text) <= max_length:
         return [text]
@@ -523,52 +613,128 @@ def split_message_smart(text: str, max_length: int = 2000) -> list[str]:
     code_block_lang = ""
     
     lines = text.split('\n')
+    i = 0
     
-    for line in lines:
-        # Kiểm tra xem có phải là code block delimiter không
+    while i < len(lines):
+        line = lines[i]
+        
+        # Handle code blocks
         code_match = re.match(r'^```(\w*)', line.strip())
         if code_match:
             if not in_code_block:
-                # Bắt đầu code block
                 in_code_block = True
                 code_block_lang = code_match.group(1)
             else:
-                # Kết thúc code block
                 in_code_block = False
                 code_block_lang = ""
         
-        # Thêm line vào chunk hiện tại
+        # Handle tables (only when NOT in code block)
+        if is_table_line(line) and not in_code_block:
+            table_start, table_end = find_complete_table(lines, i)
+            
+            # Get the entire table as one unit
+            table_lines = lines[table_start:table_end + 1]
+            table_text = '\n'.join(table_lines)
+            
+            # Try to add the complete table to current chunk
+            test_chunk = current_chunk + ('\n' if current_chunk else '') + table_text
+            
+            if len(test_chunk) <= max_length:
+                # Table fits in current chunk
+                current_chunk = test_chunk
+            else:
+                # Table doesn't fit
+                if current_chunk:
+                    # Save current chunk first
+                    if in_code_block:
+                        current_chunk += '\n```'
+                    chunks.append(current_chunk)
+                    if in_code_block:
+                        current_chunk = f'```{code_block_lang}'
+                    else:
+                        current_chunk = ""
+                
+                # Handle the table
+                if len(table_text) <= max_length:
+                    # Table fits in its own chunk
+                    current_chunk = table_text
+                else:
+                    # Table is too large - need to split it intelligently
+                    # Keep header + separator together if possible
+                    header_lines = []
+                    data_lines = []
+                    
+                    # Try to identify header vs data
+                    for j, tline in enumerate(table_lines):
+                        if j < 2:  # Usually header + separator
+                            header_lines.append(tline)
+                        else:
+                            data_lines.append(tline)
+                    
+                    if len(header_lines) >= 2:
+                        header_text = '\n'.join(header_lines)
+                        if len(header_text) <= max_length:
+                            # Start with header
+                            current_table_chunk = header_text
+                            
+                            # Add data lines one by one
+                            for data_line in data_lines:
+                                test_line = current_table_chunk + '\n' + data_line
+                                if len(test_line) <= max_length:
+                                    current_table_chunk = test_line
+                                else:
+                                    # Current chunk is full, save it
+                                    chunks.append(current_table_chunk)
+                                    # Start new chunk with header + current data line
+                                    current_table_chunk = header_text + '\n' + data_line
+                            
+                            current_chunk = current_table_chunk
+                        else:
+                            # Even header is too long, fallback to line by line
+                            for tline in table_lines:
+                                test_line = current_chunk + ('\n' if current_chunk else '') + tline
+                                if len(test_line) <= max_length:
+                                    current_chunk = test_line
+                                else:
+                                    if current_chunk:
+                                        chunks.append(current_chunk)
+                                    current_chunk = tline
+                    else:
+                        # Fallback: process line by line
+                        for tline in table_lines:
+                            test_line = current_chunk + ('\n' if current_chunk else '') + tline
+                            if len(test_line) <= max_length:
+                                current_chunk = test_line
+                            else:
+                                if current_chunk:
+                                    chunks.append(current_chunk)
+                                current_chunk = tline
+            
+            # Skip to after the table
+            i = table_end + 1
+            continue
+        
+        # Regular line processing (not part of a table)
         test_chunk = current_chunk + ('\n' if current_chunk else '') + line
         
         if len(test_chunk) > max_length:
             if current_chunk:
-                # Nếu đang trong code block, đóng nó trước khi chia
+                # Save current chunk
                 if in_code_block:
                     current_chunk += '\n```'
                     chunks.append(current_chunk)
-                    # Bắt đầu chunk mới với code block
                     current_chunk = f'```{code_block_lang}\n{line}'
                 else:
                     chunks.append(current_chunk)
                     current_chunk = line
             else:
-                # Line quá dài, cần chia nhỏ hơn
+                # Single line is too long - split it
                 if len(line) > max_length:
-                    # Chia line dài thành nhiều phần - BẢO TOÀN indentation
-                    original_line = line
-                    leading_whitespace = ''
+                    # Preserve indentation
+                    leading_whitespace = re.match(r'^(\s*)', line).group(1)
+                    line_content = line[len(leading_whitespace):]
                     
-                    # Lưu leading whitespace
-                    match = re.match(r'^(\s*)', original_line)
-                    if match:
-                        leading_whitespace = match.group(1)
-                        line_content = original_line[len(leading_whitespace):]
-                    else:
-                        line_content = original_line
-                    
-                    # Chia content thành các phần
                     while len(line_content) > max_length - len(leading_whitespace):
-                        # Tính toán space available cho content
                         available_space = max_length - len(leading_whitespace)
                         part_content = line_content[:available_space]
                         chunks.append(leading_whitespace + part_content)
@@ -580,45 +746,53 @@ def split_message_smart(text: str, max_length: int = 2000) -> list[str]:
                     current_chunk = line
         else:
             current_chunk = test_chunk
+        
+        i += 1
     
     if current_chunk:
         chunks.append(current_chunk)
     
     return chunks
 
-
+# Update the message sending functions
 async def send_long_message(channel, content: str, max_msg_length: int = 2000):
     """
-    Gửi tin nhắn dài, tự động chia nhỏ nếu cần
+    Send long message with proper table handling
     """
-    if len(content) <= max_msg_length:
-        await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
+    # First apply LaTeX conversion (which now preserves tables)
+    formatted_content = convert_latex_to_discord(content)
+    
+    if len(formatted_content) <= max_msg_length:
+        await channel.send(formatted_content, allowed_mentions=discord.AllowedMentions.none())
         return
     
-    chunks = split_message_smart(content, max_msg_length)
+    chunks = split_message_smart(formatted_content, max_msg_length)
     
     for i, chunk in enumerate(chunks):
-        if i > 0:  # Thêm delay giữa các tin nhắn
+        if i > 0:  # Add delay between messages
             await asyncio.sleep(0.3)
         await channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
 
 async def send_long_message_with_reference(channel, content: str, reference_message: discord.Message, max_msg_length: int = 2000):
     """
-    Gửi tin nhắn dài với reference, tự động chia nhỏ nếu cần
+    Send long message with reference and proper table handling
     """
-    if len(content) <= max_msg_length:
+    # First apply LaTeX conversion (which now preserves tables)
+    formatted_content = convert_latex_to_discord(content)
+    
+    if len(formatted_content) <= max_msg_length:
         await channel.send(
-            content,
+            formatted_content,
             reference=reference_message,
             allowed_mentions=discord.AllowedMentions.none()
         )
         return
     
-    chunks = split_message_smart(content, max_msg_length)
+    chunks = split_message_smart(formatted_content, max_msg_length)
     
     for i, chunk in enumerate(chunks):
-        if i > 0:  # Thêm delay giữa các tin nhắn
+        if i > 0:  # Add delay between messages
             await asyncio.sleep(0.3)
         
         # Only reference the original message for the first chunk
@@ -738,26 +912,48 @@ async def on_message(message: discord.Message):
 # ------------------------------------------------------------------
 # Setup – register commands, listeners, load data
 # ------------------------------------------------------------------
+# ------------------------------------------------------------------
+# Setup – register commands, listeners, load data (updated for MongoDB)
+# ------------------------------------------------------------------
 def setup(bot: commands.Bot, call_api_module, config_module):
     global _bot, _call_api, _config, _authorized_users, _memory_store, _user_config_manager, _request_queue
+    global _use_mongodb_auth, _mongodb_store
 
     _bot = bot
     _call_api = call_api_module
     _config = config_module
-    _user_config_manager = get_user_config_manager()  # Khởi tạo user config manager
-    _request_queue = get_request_queue()  # Khởi tạo request queue
+    
+    # Initialize storage backend
+    _config.init_storage()
+    
+    # Check if we're using MongoDB
+    _use_mongodb_auth = _config.USE_MONGODB
+    if _use_mongodb_auth:
+        from mongodb_store import get_mongodb_store
+        _mongodb_store = get_mongodb_store()
+        logger.info("Using MongoDB for data storage")
+    else:
+        _mongodb_store = None
+        logger.info("Using file-based storage (legacy mode)")
+    
+    # Initialize managers
+    _user_config_manager = get_user_config_manager()
+    _request_queue = get_request_queue()
 
     # Setup queue
     _request_queue.set_bot(bot)
     _request_queue.set_process_callback(process_ai_request)
 
     # Load authorized users
-    _authorized_users = load_authorized_from_path(_config.AUTHORIZED_STORE)
+    _authorized_users = load_authorized_users()
     logger.info("Functions module initialized. Authorized users: %s", sorted(_authorized_users))
 
     # Initialize memory store
     _memory_store = MemoryStore()
-    logger.info("Memory store: %d users cached", len(_memory_store._cache))
+    if not _use_mongodb_auth:
+        logger.info("Memory store: %d users cached", len(_memory_store._cache))
+    else:
+        logger.info("Memory store initialized with MongoDB backend")
 
     # ------------------------------------------------------------------
     # Remove default help (if any)
