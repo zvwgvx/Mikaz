@@ -307,287 +307,67 @@ async def clearmemory_cmd(ctx: commands.Context, target: discord.Member = None):
 # ------------------------------------------------------------------
 def convert_latex_to_discord(text: str) -> str:
     """
-    Chuyển đổi các ký hiệu LaTeX thành text/Unicode phù hợp với Discord
-    IMPROVED: Xử lý tốt hơn các công thức phức tạp và formatting
+    Alternative version with more sophisticated code detection
     """
-    latex_conversions = {
-        # Math operators
-        r'\oplus': '⊕',  # XOR symbol
-        r'\neq': '≠',    # Not equal
-        r'\leq': '≤',    # Less than or equal
-        r'\geq': '≥',    # Greater than or equal
-        r'\in': '∈',     # Element of
-        r'\notin': '∉',  # Not element of
-        r'\subset': '⊂', # Subset
-        r'\supset': '⊃', # Superset
-        r'\subseteq': '⊆', # Subset or equal
-        r'\supseteq': '⊇', # Superset or equal
-        r'\cap': '∩',    # Intersection
-        r'\cup': '∪',    # Union
-        r'\emptyset': '∅', # Empty set
-        r'\varnothing': '∅', # Empty set (variant)
-        r'\infty': '∞',  # Infinity
-        r'\pm': '±',     # Plus minus
-        r'\mp': '∓',     # Minus plus
-        r'\times': '×',  # Times
-        r'\div': '÷',    # Division
-        r'\cdot': '·',   # Center dot
-        r'\bullet': '•', # Bullet
-        r'\circ': '∘',   # Circle operator
-        r'\ast': '∗',    # Asterisk operator
-        r'\star': '⋆',   # Star operator
-        r'\bigstar': '★', # Big star
-        
-        # Logic
-        r'\land': '∧',   # Logical AND
-        r'\lor': '∨',    # Logical OR
-        r'\neg': '¬',    # Logical NOT
-        r'\lnot': '¬',   # Logical NOT (alternative)
-        r'\implies': '⇒', # Implies
-        r'\impliedby': '⇐', # Implied by
-        r'\iff': '⇔',    # If and only if
-        r'\forall': '∀', # For all
-        r'\exists': '∃', # There exists
-        r'\nexists': '∄', # Does not exist
-        
-        # Greek letters (comprehensive)
-        r'\alpha': 'α', r'\Alpha': 'Α',
-        r'\beta': 'β', r'\Beta': 'Β',
-        r'\gamma': 'γ', r'\Gamma': 'Γ',
-        r'\delta': 'δ', r'\Delta': 'Δ',
-        r'\epsilon': 'ε', r'\varepsilon': 'ε', r'\Epsilon': 'Ε',
-        r'\zeta': 'ζ', r'\Zeta': 'Ζ',
-        r'\eta': 'η', r'\Eta': 'Η',
-        r'\theta': 'θ', r'\vartheta': 'θ', r'\Theta': 'Θ',
-        r'\iota': 'ι', r'\Iota': 'Ι',
-        r'\kappa': 'κ', r'\Kappa': 'Κ',
-        r'\lambda': 'λ', r'\Lambda': 'Λ',
-        r'\mu': 'μ', r'\Mu': 'Μ',
-        r'\nu': 'ν', r'\Nu': 'Ν',
-        r'\xi': 'ξ', r'\Xi': 'Ξ',
-        r'\omicron': 'ο', r'\Omicron': 'Ο',
-        r'\pi': 'π', r'\Pi': 'Π',
-        r'\rho': 'ρ', r'\varrho': 'ρ', r'\Rho': 'Ρ',
-        r'\sigma': 'σ', r'\varsigma': 'ς', r'\Sigma': 'Σ',
-        r'\tau': 'τ', r'\Tau': 'Τ',
-        r'\upsilon': 'υ', r'\Upsilon': 'Υ',
-        r'\phi': 'φ', r'\varphi': 'φ', r'\Phi': 'Φ',
-        r'\chi': 'χ', r'\Chi': 'Χ',
-        r'\psi': 'ψ', r'\Psi': 'Ψ',
-        r'\omega': 'ω', r'\Omega': 'Ω',
-        
-        # Arrows
-        r'\rightarrow': '→', r'\to': '→',
-        r'\leftarrow': '←', r'\gets': '←',
-        r'\leftrightarrow': '↔',
-        r'\uparrow': '↑',
-        r'\downarrow': '↓',
-        r'\updownarrow': '↕',
-        r'\Rightarrow': '⇒',
-        r'\Leftarrow': '⇐',
-        r'\Leftrightarrow': '⇔',
-        r'\Uparrow': '⇑',
-        r'\Downarrow': '⇓',
-        r'\Updownarrow': '⇕',
-        r'\nearrow': '↗',
-        r'\searrow': '↘',
-        r'\swarrow': '↙',
-        r'\nwarrow': '↖',
-        
-        # Set theory and relations
-        r'\approx': '≈',
-        r'\sim': '∼',
-        r'\cong': '≅',
-        r'\equiv': '≡',
-        r'\prec': '≺',
-        r'\succ': '≻',
-        r'\preceq': '⪯',
-        r'\succeq': '⪰',
-        r'\parallel': '∥',
-        r'\perp': '⊥',
-        
-        # Calculus
-        r'\int': '∫',
-        r'\iint': '∬',
-        r'\iiint': '∭',
-        r'\oint': '∮',
-        r'\partial': '∂',
-        r'\nabla': '∇',
-        r'\sum': 'Σ',
-        r'\prod': 'Π',
-        r'\coprod': '∐',
-        
-        # Number sets
-        r'\mathbb{N}': 'ℕ',
-        r'\mathbb{Z}': 'ℤ',
-        r'\mathbb{Q}': 'ℚ',
-        r'\mathbb{R}': 'ℝ',
-        r'\mathbb{C}': 'ℂ',
-        r'\mathbb{P}': 'ℙ',
-        
-        # Brackets and groupings
-        r'\{': '{', r'\}': '}',
-        r'\langle': '⟨', r'\rangle': '⟩',
-        r'\lfloor': '⌊', r'\rfloor': '⌊',
-        r'\lceil': '⌈', r'\rceil': '⌉',
-        r'\lvert': '|', r'\rvert': '|',
-        r'\lVert': '‖', r'\rVert': '‖',
-        
-        # Misc symbols
-        r'\dots': '…', r'\ldots': '…', r'\cdots': '⋯',
-        r'\vdots': '⋮', r'\ddots': '⋱',
-        r'\hbar': 'ℏ',
-        r'\ell': 'ℓ',
-        r'\Re': 'ℜ', r'\Im': 'ℑ',
-        r'\wp': '℘',
-        r'\deg': '°',
-        r'\angle': '∠',
-        r'\triangle': '△',
-        r'\square': '□',
-        r'\diamond': '◊',
-        r'\clubsuit': '♣',
-        r'\diamondsuit': '♢',
-        r'\heartsuit': '♡',
-        r'\spadesuit': '♠',
+    
+    # Step 1: Identify and protect code regions
+    protected_regions = []
+    
+    def protect_region(match):
+        content = match.group(0)
+        placeholder = f"__PROTECTED_{len(protected_regions)}__"
+        protected_regions.append(content)
+        return placeholder
+    
+    # Protect various code patterns
+    patterns_to_protect = [
+        r'```[\s\S]*?```',  # Code blocks
+        r'`[^`\n]*?`',      # Inline code  
+        r'#include\s*<[^>]+>', # C++ includes
+        r'\b(?:cout|cin|std::)\b[^.\n]*?;',  # C++ statements
+        r'\bfor\s*\([^)]*\)\s*\{[^}]*\}',   # For loops
+        r'\bwhile\s*\([^)]*\)\s*\{[^}]*\}', # While loops
+        r'\bif\s*\([^)]*\)\s*\{[^}]*\}',    # If statements
+    ]
+    
+    working_text = text
+    for pattern in patterns_to_protect:
+        working_text = re.sub(pattern, protect_region, working_text, flags=re.MULTILINE | re.DOTALL)
+    
+    # Step 2: Apply LaTeX conversion to remaining text
+    # (Same LaTeX processing as above, but simplified)
+    
+    # Simple replacements for common LaTeX symbols
+    latex_replacements = {
+        r'\\cdot\b': '·', r'\\times\b': '×', r'\\div\b': '÷', r'\\pm\b': '±',
+        r'\\leq\b': '≤', r'\\geq\b': '≥', r'\\neq\b': '≠', r'\\approx\b': '≈',
+        r'\\alpha\b': 'α', r'\\beta\b': 'β', r'\\gamma\b': 'γ', r'\\delta\b': 'δ',
+        r'\\pi\b': 'π', r'\\sigma\b': 'σ', r'\\lambda\b': 'λ', r'\\mu\b': 'μ',
+        r'\\rightarrow\b': '→', r'\\to\b': '→', r'\\leftarrow\b': '←',
+        r'\\sum\b': 'Σ', r'\\prod\b': 'Π', r'\\int\b': '∫',
+        r'\\infty\b': '∞', r'\\emptyset\b': '∅',
     }
     
-    # Chia text thành từng dòng để xử lý riêng biệt
-    lines = text.split('\n')
-    processed_lines = []
+    for latex_pattern, replacement in latex_replacements.items():
+        working_text = re.sub(latex_pattern, replacement, working_text)
     
-    for line in lines:
-        # Bảo toàn leading whitespace
-        leading_whitespace = ''
-        stripped_line = line
-        
-        match = re.match(r'^(\s*)', line)
-        if match:
-            leading_whitespace = match.group(1)
-            stripped_line = line[len(leading_whitespace):]
-        
-        # === PREPROCESSING: Xử lý các construct phức tạp trước ===
-        
-        # 1. Xử lý matrices (bmatrix, pmatrix, matrix, etc.)
-        # Convert \begin{bmatrix}...\end{bmatrix} to [...]
-        stripped_line = re.sub(r'\\begin\{[bp]?matrix\}(.*?)\\end\{[bp]?matrix\}', 
-                              lambda m: '[' + m.group(1).replace('\\\\', '; ').replace('&', ', ') + ']', 
-                              stripped_line, flags=re.DOTALL)
-        
-        # 2. Xử lý các function names phổ biến
-        function_names = [
-            'log', 'ln', 'exp', 'sin', 'cos', 'tan', 'cot', 'sec', 'csc',
-            'arcsin', 'arccos', 'arctan', 'sinh', 'cosh', 'tanh',
-            'min', 'max', 'sup', 'inf', 'lim', 'det', 'tr', 'rank',
-            'dim', 'ker', 'span', 'gcd', 'lcm'
-        ]
-        for func in function_names:
-            # Replace \func with func (remove backslash)
-            stripped_line = re.sub(rf'\\{func}\b', func, stripped_line)
-        
-        # 3. Xử lý fractions \frac{a}{b} -> (a)/(b)
-        # Improved to handle nested braces better
-        def replace_frac(match):
-            num = match.group(1)
-            den = match.group(2)
-            # If numerator or denominator is single character/simple, don't need parentheses
-            if re.match(r'^[a-zA-Z0-9]$', num.strip()) and re.match(r'^[a-zA-Z0-9]$', den.strip()):
-                return f'{num}/{den}'
-            return f'({num})/({den})'
-        
-        # Handle nested fractions iteratively
-        while r'\frac{' in stripped_line:
-            stripped_line = re.sub(r'\\frac\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}', 
-                                 replace_frac, stripped_line)
-        
-        # 4. Xử lý powers và limits
-        # \sum_{i=1}^{n} -> Σ(i=1 to n)
-        stripped_line = re.sub(r'\\sum_\{([^}]+)\}\^\{([^}]+)\}', r'Σ(\1 to \2)', stripped_line)
-        stripped_line = re.sub(r'\\prod_\{([^}]+)\}\^\{([^}]+)\}', r'Π(\1 to \2)', stripped_line)
-        stripped_line = re.sub(r'\\int_\{([^}]+)\}\^\{([^}]+)\}', r'∫[\1 to \2]', stripped_line)
-        
-        # 5. Xử lý limits
-        stripped_line = re.sub(r'\\lim_\{([^}]+)\\to([^}]+)\}', r'lim(\1→\2)', stripped_line)
-        
-        # === MAIN CONVERSIONS ===
-        
-        # Apply LaTeX symbol conversions
-        for latex, unicode_char in latex_conversions.items():
-            # Use word boundaries to avoid partial matches
-            pattern = latex.replace('\\', r'\\') + r'\b'
-            stripped_line = re.sub(pattern, unicode_char, stripped_line)
-        
-        # === SUBSCRIPTS AND SUPERSCRIPTS ===
-        
-        # Enhanced subscript handling
-        subscript_map = {
-            '0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄', 
-            '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉',
-            'a': 'ₐ', 'e': 'ₑ', 'i': 'ᵢ', 'j': 'ⱼ', 'k': 'ₖ', 
-            'l': 'ₗ', 'm': 'ₘ', 'n': 'ₙ', 'o': 'ₒ', 'p': 'ₚ',
-            'r': 'ᵣ', 's': 'ₛ', 't': 'ₜ', 'u': 'ᵤ', 'v': 'ᵥ',
-            'x': 'ₓ', '+': '₊', '-': '₋', '=': '₌', '(': '₍', ')': '₎'
-        }
-        
-        # Handle complex subscripts _{...}
-        def replace_subscript_complex(match):
-            content = match.group(2)
-            result = ''
-            for char in content:
-                result += subscript_map.get(char, char)
-            return match.group(1) + result
-        
-        stripped_line = re.sub(r'([a-zA-Z0-9])_\{([^}]+)\}', replace_subscript_complex, stripped_line)
-        
-        # Handle simple subscripts _x
-        for char, sub in subscript_map.items():
-            stripped_line = re.sub(rf'([a-zA-Z0-9])_{re.escape(char)}', rf'\1{sub}', stripped_line)
-        
-        # Enhanced superscript handling
-        superscript_map = {
-            '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴',
-            '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
-            '+': '⁺', '-': '⁻', '=': '⁼', '(': '⁽', ')': '⁾',
-            'n': 'ⁿ', 'i': 'ⁱ', 'j': 'ʲ', 'k': 'ᵏ', 'T': 'ᵀ'
-        }
-        
-        # Handle complex superscripts ^{...}
-        def replace_superscript_complex(match):
-            content = match.group(2)
-            result = ''
-            for char in content:
-                result += superscript_map.get(char, char)
-            return match.group(1) + result
-        
-        stripped_line = re.sub(r'([a-zA-Z0-9\)])(\^\{[^}]+\})', replace_superscript_complex, stripped_line)
-        
-        # Handle simple superscripts ^x
-        for char, sup in superscript_map.items():
-            stripped_line = re.sub(rf'(\w)\^{re.escape(char)}', rf'\1{sup}', stripped_line)
-        
-        # === CLEANUP ===
-        
-        # Remove remaining LaTeX commands that we couldn't convert
-        stripped_line = re.sub(r'\\[a-zA-Z]+\*?', '', stripped_line)
-        
-        # Clean up extra braces that might be left
-        stripped_line = re.sub(r'\{([^{}]*)\}', r'\1', stripped_line)
-        
-        # Clean up multiple spaces in content (but preserve indentation)
-        stripped_line = re.sub(r' {2,}', ' ', stripped_line).rstrip()
-        
-        # Fix spacing around mathematical operators
-        stripped_line = re.sub(r'([=+\-*/])', r' \1 ', stripped_line)  # Add spaces around operators
-        stripped_line = re.sub(r' {2,}', ' ', stripped_line)  # Clean up double spaces again
-        
-        # Ghép lại với leading whitespace
-        processed_line = leading_whitespace + stripped_line
-        processed_lines.append(processed_line)
+    # Handle fractions \frac{a}{b} -> a/b
+    def replace_fraction(match):
+        numerator = match.group(1).strip()
+        denominator = match.group(2).strip()
+        if len(numerator) <= 3 and len(denominator) <= 3:
+            return f'{numerator}/{denominator}'
+        else:
+            return f'({numerator})/({denominator})'
     
-    # Ghép lại các dòng
-    result = '\n'.join(processed_lines)
+    working_text = re.sub(r'\\frac\{([^{}]+)\}\{([^{}]+)\}', replace_fraction, working_text)
     
-    return result
-
+    # Step 3: Restore protected regions
+    for i, protected_content in enumerate(protected_regions):
+        placeholder = f"__PROTECTED_{i}__"
+        working_text = working_text.replace(placeholder, protected_content)
+    
+    return working_text
 
 def split_message_smart(text: str, max_length: int = 2000) -> list[str]:
     """
