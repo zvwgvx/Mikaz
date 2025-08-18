@@ -618,10 +618,9 @@ async def send_long_message_with_reference(channel, content: str, reference_mess
     chunks = split_message_smart(content, max_msg_length)
     
     for i, chunk in enumerate(chunks):
-        if i > 0:  # Thêm delay giữa các tin nhắn
+        if i > 0:  
             await asyncio.sleep(0.3)
         
-        # Only reference the original message for the first chunk
         ref = reference_message if i == 0 else None
         await channel.send(
             chunk,
