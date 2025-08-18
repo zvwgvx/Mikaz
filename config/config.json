@@ -2,7 +2,7 @@
   "DISCORD_TOKEN": "x",
   "OPENAI_API_KEY": "x",
   "OPENAI_API_BASE": "x",
-  "OPENAI_MODEL": "gpt-oss-120b",
+  "OPENAI_MODEL": "gpt-5",
 
   "REQUEST_TIMEOUT":         50,
   "MAX_MSG":                 1900, 
