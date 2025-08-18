@@ -26,7 +26,7 @@ The project layout is
 `main` module that builds the bot, and starts the bot.
 
 It keeps the same logging configuration already defined in
-`src/main.py`; therefore the one‑liner below is all that is needed
+`src/main.py`; therefore the one-liner below is all that is needed
 to start the bot from the project root.
 """
 

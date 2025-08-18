@@ -3,6 +3,7 @@
 # ────────────────────────────────────────────────────────────────────────
 # Bot helper / command registry
 # Uses MemoryStore for per‑user conversation history
+# Uses UserConfigManager for per-user model and system prompt settings
 # ────────────────────────────────────────────────────────────────────────
 
 import re
@@ -18,6 +19,8 @@ from discord.ext import commands
 # ───────────────────────────────────────────────────────
 # ***Absolute import – no package, so we use the plain module name ***
 from memory_store import MemoryStore
+from user_config import get_user_config_manager
+from request_queue import get_request_queue
 
 logger = logging.getLogger("discord-openai-proxy.functions")
 
@@ -25,7 +28,8 @@ logger = logging.getLogger("discord-openai-proxy.functions")
 _bot: Optional[commands.Bot] = None
 _call_api = None
 _config = None
-_SYSTEM_PROMPT: Optional[Dict[str, str]] = None
+_user_config_manager = None
+_request_queue = None
 
 # ---------------------------------------------------------------
 # Persistence helpers – authorized user IDs
@@ -178,6 +182,11 @@ async def help_cmd(ctx: commands.Context):
         "**Available commands:**",
         "`;getid [@member]` – Show your ID (or a mention). (everyone)",
         "`;ping` – Check bot responsiveness. (everyone)",
+        "`;setmodel <model>` – Set your preferred AI model. (authorized users)",
+        "`;setsprompt <prompt>` – Set your system prompt. (authorized users)", 
+        "`;showconfig` – Show your current model and system prompt. (authorized users)",
+        "",
+        "**Supported models:** gpt-oss-120b, gpt-oss-20b, gpt-5, o3-mini, gpt-4.1",
         "",
         "**Attachment support:** when you attach a text/code file (.py, .txt, .md, .json, …)",
         "the bot will read it and include its contents in the reply.",
@@ -301,6 +310,137 @@ async def clearmemory_cmd(ctx: commands.Context, target: discord.Member = None):
 
     _memory_store.clear_user(target.id)
     await ctx.send(f"Cleared memory for {target}.", allowed_mentions=discord.AllowedMentions.none())
+
+# ------------------------------------------------------------------
+# User configuration commands
+# ------------------------------------------------------------------
+async def setmodel_cmd(ctx: commands.Context, *, model: str = None):
+    """Set user's preferred AI model."""
+    # Check authorization
+    if not await is_authorized_user(ctx.author):
+        await ctx.send("Bạn không có quyền sử dụng lệnh này.", allowed_mentions=discord.AllowedMentions.none())
+        return
+    
+    if model is None:
+        from user_config import SUPPORTED_MODELS
+        supported_list = ", ".join(sorted(SUPPORTED_MODELS))
+        await ctx.send(f"Vui lòng chỉ định model. Ví dụ: `;setmodel gpt-oss-120b`\n**Các model có sẵn:** {supported_list}", 
+                      allowed_mentions=discord.AllowedMentions.none())
+        return
+    
+    model = model.strip()
+    success, message = _user_config_manager.set_user_model(ctx.author.id, model)
+    await ctx.send(message, allowed_mentions=discord.AllowedMentions.none())
+
+
+async def setsprompt_cmd(ctx: commands.Context, *, prompt: str = None):
+    """Set user's system prompt."""
+    # Check authorization
+    if not await is_authorized_user(ctx.author):
+        await ctx.send("Bạn không có quyền sử dụng lệnh này.", allowed_mentions=discord.AllowedMentions.none())
+        return
+    
+    if prompt is None:
+        await ctx.send("Vui lòng cung cấp system prompt. Ví dụ: `;setsprompt Bạn là một trợ lý AI thông minh`", 
+                      allowed_mentions=discord.AllowedMentions.none())
+        return
+    
+    success, message = _user_config_manager.set_user_system_prompt(ctx.author.id, prompt)
+    await ctx.send(message, allowed_mentions=discord.AllowedMentions.none())
+
+
+async def showconfig_cmd(ctx: commands.Context):
+    """Show user's current configuration."""
+    # Check authorization
+    if not await is_authorized_user(ctx.author):
+        await ctx.send("Bạn không có quyền sử dụng lệnh này.", allowed_mentions=discord.AllowedMentions.none())
+        return
+    
+    user_config = _user_config_manager.get_user_config(ctx.author.id)
+    
+    model = user_config["model"]
+    prompt = user_config["system_prompt"]
+    
+    # Truncate prompt if too long for display
+    display_prompt = prompt
+    if len(prompt) > 500:
+        display_prompt = prompt[:500] + "...[truncated]"
+    
+    lines = [
+        "**Cấu hình hiện tại của bạn:**",
+        f"**Model:** `{model}`",
+        f"**System Prompt:**",
+        f"```",
+        display_prompt,
+        f"```"
+    ]
+    
+    await ctx.send("\n".join(lines), allowed_mentions=discord.AllowedMentions.none())
+
+# ------------------------------------------------------------------
+# AI Request Processing Function (used by queue)
+# ------------------------------------------------------------------
+async def process_ai_request(request):
+    """Process a single AI request from the queue"""
+    message = request.message
+    final_user_text = request.final_user_text
+    
+    # Store the user's message in memory first (before API call)
+    if _memory_store:
+        _memory_store.add_message(message.author.id, {"role": "user", "content": final_user_text})
+
+    # Build payload for OpenAI với model và system prompt riêng của user
+    user_system_message = _user_config_manager.get_user_system_message(message.author.id)
+    user_model = _user_config_manager.get_user_model(message.author.id)
+    
+    user_memory = _memory_store.get_user_messages(message.author.id) if _memory_store else []
+    payload_messages = [user_system_message] + user_memory + [{"role": "user", "content": final_user_text}]
+
+    # ------------------------------------------------------------------
+    # Call OpenAI với model riêng của user
+    # ------------------------------------------------------------------
+    try:
+        # Send typing indicator
+        async with message.channel.typing():
+            loop = asyncio.get_running_loop()
+            ok, resp = await loop.run_in_executor(None, _call_api.call_openai_proxy, payload_messages, user_model)
+    except Exception as e:
+        logger.exception("Error calling openai proxy async")
+        await message.channel.send(
+            f"❌ Internal error: {e}",
+            reference=message,
+            allowed_mentions=discord.AllowedMentions.none()
+        )
+        return
+
+    if not ok:
+        await message.channel.send(
+            f"❌ [OpenAI PROXY ERROR] {resp}",
+            reference=message,
+            allowed_mentions=discord.AllowedMentions.none()
+        )
+        return
+
+    reply = (resp or "").strip() or "(no response from AI)"
+
+    # ------------------------------------------------------------------
+    # Convert LaTeX symbols to Discord-friendly format
+    # ------------------------------------------------------------------
+    reply = convert_latex_to_discord(reply)
+
+    # ------------------------------------------------------------------
+    # Store assistant reply in memory
+    # ------------------------------------------------------------------
+    if _memory_store:
+        _memory_store.add_message(message.author.id, {"role": "assistant", "content": reply})
+
+    # ------------------------------------------------------------------
+    # Send reply to Discord with reference to original message
+    # ------------------------------------------------------------------
+    try:
+        await send_long_message_with_reference(message.channel, reply, message, _config.MAX_MSG)
+    except Exception:
+        logger.exception("Error sending reply to Discord")
 
 # ------------------------------------------------------------------
 # Message formatting helpers
@@ -462,6 +602,33 @@ async def send_long_message(channel, content: str, max_msg_length: int = 2000):
             await asyncio.sleep(0.3)
         await channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
+
+async def send_long_message_with_reference(channel, content: str, reference_message: discord.Message, max_msg_length: int = 2000):
+    """
+    Gửi tin nhắn dài với reference, tự động chia nhỏ nếu cần
+    """
+    if len(content) <= max_msg_length:
+        await channel.send(
+            content,
+            reference=reference_message,
+            allowed_mentions=discord.AllowedMentions.none()
+        )
+        return
+    
+    chunks = split_message_smart(content, max_msg_length)
+    
+    for i, chunk in enumerate(chunks):
+        if i > 0:  # Thêm delay giữa các tin nhắn
+            await asyncio.sleep(0.3)
+        
+        # Only reference the original message for the first chunk
+        ref = reference_message if i == 0 else None
+        await channel.send(
+            chunk,
+            reference=ref,
+            allowed_mentions=discord.AllowedMentions.none()
+        )
+
 # ------------------------------------------------------------------
 # on_message listener – central dispatch point
 # ------------------------------------------------------------------
@@ -541,62 +708,48 @@ async def on_message(message: discord.Message):
         return
 
     # ------------------------------------------------------------------
-    # Store the user's message in memory first (before API call)
-    # ------------------------------------------------------------------
-    if _memory_store:
-        _memory_store.add_message(message.author.id, {"role": "user", "content": final_user_text})
-
-    # Build payload for OpenAI
-    user_memory = _memory_store.get_user_messages(message.author.id) if _memory_store else []
-    payload_messages = [_SYSTEM_PROMPT] + user_memory + [{"role": "user", "content": final_user_text}]
-
-    # ------------------------------------------------------------------
-    # Call OpenAI
+    # Add request to queue instead of processing directly
     # ------------------------------------------------------------------
     try:
-        async with message.channel.typing():
-            loop = asyncio.get_running_loop()
-            ok, resp = await loop.run_in_executor(None, _call_api.call_openai_proxy, payload_messages)
+        success, status_message = await _request_queue.add_request(message, final_user_text)
+        if not success:
+            await message.channel.send(status_message, allowed_mentions=discord.AllowedMentions.none())
+            return
+        
+        # Send status message if not immediately processing
+        queue_size = _request_queue._queue.qsize()
+        processing_count = len(_request_queue._processing_users)
+        is_owner = await _request_queue.is_owner(message.author)
+        
+        if queue_size > 1 or processing_count > 0:
+            await message.channel.send(
+                status_message,
+                reference=message,
+                allowed_mentions=discord.AllowedMentions.none()
+            )
+    
     except Exception as e:
-        logger.exception("Error calling openai proxy async")
-        await message.channel.send(f"Internal error: {e}", allowed_mentions=discord.AllowedMentions.none())
-        return
-
-    if not ok:
-        await message.channel.send(f"[OpenAI PROXY ERROR] {resp}", allowed_mentions=discord.AllowedMentions.none())
-        return
-
-    reply = (resp or "").strip() or "(no response from AI)"
-
-    # ------------------------------------------------------------------
-    # Convert LaTeX symbols to Discord-friendly format
-    # ------------------------------------------------------------------
-    reply = convert_latex_to_discord(reply)
-
-    # ------------------------------------------------------------------
-    # Store assistant reply in memory
-    # ------------------------------------------------------------------
-    if _memory_store:
-        _memory_store.add_message(message.author.id, {"role": "assistant", "content": reply})
-
-    # ------------------------------------------------------------------
-    # Send reply to Discord
-    # ------------------------------------------------------------------
-    try:
-        await send_long_message(message.channel, reply, _config.MAX_MSG)
-    except Exception:
-        logger.exception("Error sending reply to Discord")
+        logger.exception("Error adding request to queue")
+        await message.channel.send(
+            f"❌ Error adding request to queue: {e}",
+            allowed_mentions=discord.AllowedMentions.none()
+        )
 
 # ------------------------------------------------------------------
 # Setup – register commands, listeners, load data
 # ------------------------------------------------------------------
 def setup(bot: commands.Bot, call_api_module, config_module):
-    global _bot, _call_api, _config, _SYSTEM_PROMPT, _authorized_users, _memory_store
+    global _bot, _call_api, _config, _authorized_users, _memory_store, _user_config_manager, _request_queue
 
     _bot = bot
     _call_api = call_api_module
     _config = config_module
-    _SYSTEM_PROMPT = config_module.load_system_prompt()
+    _user_config_manager = get_user_config_manager()  # Khởi tạo user config manager
+    _request_queue = get_request_queue()  # Khởi tạo request queue
+
+    # Setup queue
+    _request_queue.set_bot(bot)
+    _request_queue.set_process_callback(process_ai_request)
 
     # Load authorized users
     _authorized_users = load_authorized_from_path(_config.AUTHORIZED_STORE)
@@ -620,6 +773,11 @@ def setup(bot: commands.Bot, call_api_module, config_module):
     bot.add_command(commands.Command(help_cmd, name="help"))
     bot.add_command(commands.Command(getid_cmd, name="getid"))
     bot.add_command(commands.Command(ping_cmd, name="ping"))
+
+    # User config commands (authorized users only) - authorization checked inside each command
+    bot.add_command(commands.Command(setmodel_cmd, name="setmodel"))
+    bot.add_command(commands.Command(setsprompt_cmd, name="setsprompt"))  
+    bot.add_command(commands.Command(showconfig_cmd, name="showconfig"))
 
     owner_check = commands.is_owner()
     bot.add_command(commands.Command(addid_cmd, name="addid", checks=[owner_check]))

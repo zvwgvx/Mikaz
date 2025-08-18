@@ -1,5 +1,5 @@
 # --------------------------------------------------
-# config.py  -  Improved version
+# config.py  -  Improved version (removed system prompt loading)
 # --------------------------------------------------
 import json
 import logging
@@ -25,9 +25,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 CONF_DIR = BASE_DIR / "config"
 
 ENV_FILE = CONF_DIR / "config.json"
-SYS_PROMPT_FILE = CONF_DIR / "sys_prompt.json"
 AUTHORIZED_STORE = CONF_DIR / "authorized.json"
 MEMORY_STORE = CONF_DIR / "memory.json"
+USER_CONFIG_STORE = CONF_DIR / "user_config.json"  # New file for user configs
 
 # --------------------------------------------------------------------
 # Helpers
@@ -85,36 +85,17 @@ if DISCORD_TOKEN is None or OPENAI_API_KEY is None:
     )
 
 # Nếu bạn muốn kiểm tra thêm
-SUPPORTED_MODELS = {"gpt-oss-20b", "gpt-oss-120b", "gpt-5", "o3-mini"}
+SUPPORTED_MODELS = {"gpt-oss-20b", "gpt-oss-120b", "gpt-5", "o3-mini", "gpt-4.1"}
 if OPENAI_MODEL and OPENAI_MODEL not in SUPPORTED_MODELS:
     logger.warning(f"MODEL {OPENAI_MODEL} không được liệt kê; nên giám sát sau này.")
 
 # --------------------------------------------------------------------
-# System prompt loader
+# System prompt loader (DEPRECATED - kept for backward compatibility)
 # --------------------------------------------------------------------
-DEFAULT_SYS_PROMPT = (
-    "Bạn là một chuyên gia C++ tập trung vào thuật toán và tư duy. "
-    "Tất cả tương tác diễn ra bằng tiếng Việt, bạn gọi người dùng là 'anh', "
-    "bạn gọi mình là 'miss'."
-)
-
 def load_system_prompt() -> Dict[str, str]:
-    """Trả về dict {'role':'system', 'content': ...}"""
-    if SYS_PROMPT_FILE.exists():
-        try:
-            raw = SYS_PROMPT_FILE.read_text(encoding="utf-8").strip()
-            if raw:
-                # Số kiểu dict {"content": "..."} hay chuỗi thô
-                try:
-                    obj = json.loads(raw)
-                    if isinstance(obj, dict) and "content" in obj:
-                        raw = obj["content"].strip()
-                except json.JSONDecodeError:
-                    pass
-                logger.info(f"Dùng prompt từ {SYS_PROMPT_FILE}")
-                return {"role": "system", "content": raw}
-        except Exception as exc:
-            logger.exception(f"Error đọc {SYS_PROMPT_FILE}: {exc}")
-
-    logger.warning("Không tìm thấy sys_prompt.json; dùng mặc định.")
-    return {"role": "system", "content": DEFAULT_SYS_PROMPT}
+    """
+    DEPRECATED: System prompts are now managed per-user.
+    This function is kept for backward compatibility but will return empty.
+    """
+    logger.warning("load_system_prompt() is deprecated. System prompts are now managed per-user.")
+    return {"role": "system", "content": ""}

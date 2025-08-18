@@ -14,14 +14,20 @@ except TypeError:
     openai_client = OpenAI(api_key=load_config.OPENAI_API_KEY)
 
 
-def call_openai_proxy(messages):
+def call_openai_proxy(messages, model=None):
     """Call OpenAI chat completions via proxy client.
+    Args:
+        messages: List of message dictionaries for the conversation
+        model: Model to use (optional, defaults to config model)
     Returns (ok: bool, content_or_error: str)
     Keeps behavior same as original code.
     """
+    # Use provided model or fall back to config default
+    selected_model = model or load_config.OPENAI_MODEL
+    
     try:
         resp = openai_client.chat.completions.create(
-            model=load_config.OPENAI_MODEL,
+            model=selected_model,
             messages=messages,
         )
     except Exception as e:
