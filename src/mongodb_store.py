@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # coding: utf-8
-# mongodb_store.py - MongoDB storage for user configs, memory, and authorized users
+# mongodb_store.py - MongoDB storage for user configs, memory, authorized users, and supported models
 
 import logging
 from typing import Dict, List, Optional, Any, Set
@@ -25,10 +25,12 @@ class MongoDBStore:
         self.COLLECTIONS = {
             'user_config': 'user_configs',
             'memory': 'user_memory', 
-            'authorized': 'authorized_users'
+            'authorized': 'authorized_users',
+            'models': 'supported_models'  # NEW: Collection for supported models
         }
         
         self._connect()
+        self._initialize_default_models()
     
     def _connect(self):
         """Establish MongoDB connection"""
@@ -68,9 +70,32 @@ class MongoDBStore:
             # Authorized users indexes
             self.db[self.COLLECTIONS['authorized']].create_index("user_id", unique=True)
             
+            # Supported models indexes
+            self.db[self.COLLECTIONS['models']].create_index("model_name", unique=True)
+            
             logger.info("MongoDB indexes created successfully")
         except Exception as e:
             logger.exception(f"Error creating indexes: {e}")
+    
+    def _initialize_default_models(self):
+        """Initialize default supported models if collection is empty"""
+        try:
+            # Check if models collection exists and has data
+            count = self.db[self.COLLECTIONS['models']].count_documents({})
+            if count == 0:
+                # Insert default models
+                default_models = [
+                    {"model_name": "o3-mini", "created_at": datetime.utcnow(), "is_default": True},
+                    {"model_name": "gpt-4.1", "created_at": datetime.utcnow(), "is_default": True},
+                    {"model_name": "gpt-5", "created_at": datetime.utcnow(), "is_default": True},
+                    {"model_name": "gpt-oss-20b", "created_at": datetime.utcnow(), "is_default": True},
+                    {"model_name": "gpt-oss-120b", "created_at": datetime.utcnow(), "is_default": True},
+                ]
+                
+                self.db[self.COLLECTIONS['models']].insert_many(default_models)
+                logger.info("Default models initialized in MongoDB")
+        except Exception as e:
+            logger.exception(f"Error initializing default models: {e}")
     
     def close(self):
         """Close MongoDB connection"""
@@ -79,7 +104,114 @@ class MongoDBStore:
             logger.info("MongoDB connection closed")
     
     # =====================================
-    # USER CONFIG METHODS
+    # SUPPORTED MODELS METHODS (NEW)
+    # =====================================
+    
+    def get_supported_models(self) -> Set[str]:
+        """Get set of supported model names"""
+        try:
+            results = self.db[self.COLLECTIONS['models']].find({}, {"model_name": 1})
+            return {doc["model_name"] for doc in results}
+        except Exception as e:
+            logger.exception(f"Error getting supported models: {e}")
+            # Return default models as fallback
+            return {"o3-mini", "gpt-4.1", "gpt-5", "gpt-oss-20b", "gpt-oss-120b"}
+    
+    def add_supported_model(self, model_name: str) -> tuple[bool, str]:
+        """
+        Add a new supported model
+        Returns: (success: bool, message: str)
+        """
+        try:
+            model_name = model_name.strip()
+            if not model_name:
+                return False, "Model name cannot be empty"
+            
+            # Check if model already exists
+            existing = self.db[self.COLLECTIONS['models']].find_one({"model_name": model_name})
+            if existing:
+                return False, f"Model '{model_name}' already exists"
+            
+            # Add new model
+            result = self.db[self.COLLECTIONS['models']].insert_one({
+                "model_name": model_name,
+                "created_at": datetime.utcnow(),
+                "is_default": False
+            })
+            
+            if result.inserted_id:
+                return True, f"Successfully added model '{model_name}'"
+            else:
+                return False, "Failed to add model to database"
+                
+        except Exception as e:
+            logger.exception(f"Error adding model {model_name}: {e}")
+            return False, f"Database error: {e}"
+    
+    def remove_supported_model(self, model_name: str) -> tuple[bool, str]:
+        """
+        Remove a supported model
+        Returns: (success: bool, message: str)
+        """
+        try:
+            model_name = model_name.strip()
+            if not model_name:
+                return False, "Model name cannot be empty"
+            
+            # Check if model exists
+            existing = self.db[self.COLLECTIONS['models']].find_one({"model_name": model_name})
+            if not existing:
+                return False, f"Model '{model_name}' does not exist"
+            
+            # Prevent removal of default models (optional safety check)
+            if existing.get("is_default", False):
+                return False, f"Cannot remove default model '{model_name}'"
+            
+            # Check if any users are currently using this model
+            users_using_model = self.db[self.COLLECTIONS['user_config']].count_documents({"model": model_name})
+            if users_using_model > 0:
+                return False, f"Cannot remove model '{model_name}' - {users_using_model} user(s) are currently using it"
+            
+            # Remove the model
+            result = self.db[self.COLLECTIONS['models']].delete_one({"model_name": model_name})
+            
+            if result.deleted_count > 0:
+                return True, f"Successfully removed model '{model_name}'"
+            else:
+                return False, "Failed to remove model from database"
+                
+        except Exception as e:
+            logger.exception(f"Error removing model {model_name}: {e}")
+            return False, f"Database error: {e}"
+    
+    def model_exists(self, model_name: str) -> bool:
+        """Check if a model exists in supported models"""
+        try:
+            result = self.db[self.COLLECTIONS['models']].find_one({"model_name": model_name})
+            return result is not None
+        except Exception as e:
+            logger.exception(f"Error checking if model {model_name} exists: {e}")
+            return False
+    
+    def get_model_info(self, model_name: str) -> Optional[Dict[str, Any]]:
+        """Get detailed information about a model"""
+        try:
+            return self.db[self.COLLECTIONS['models']].find_one({"model_name": model_name})
+        except Exception as e:
+            logger.exception(f"Error getting model info for {model_name}: {e}")
+            return None
+    
+    def list_all_models(self) -> List[Dict[str, Any]]:
+        """Get list of all models with their details"""
+        try:
+            results = self.db[self.COLLECTIONS['models']].find({}).sort("created_at", 1)
+            return list(results)
+        except Exception as e:
+            logger.exception(f"Error listing all models: {e}")
+            return []
+    
+    # =====================================
+    # USER CONFIG METHODS (Updated to use database models)
     # =====================================
     
     def get_user_config(self, user_id: int) -> Dict[str, Any]:
@@ -87,25 +219,41 @@ class MongoDBStore:
         try:
             result = self.db[self.COLLECTIONS['user_config']].find_one({"user_id": user_id})
             if result:
+                # Validate that the user's model still exists
+                user_model = result.get("model", "gpt-5")
+                if not self.model_exists(user_model):
+                    # Model no longer exists, fallback to first available model
+                    supported_models = self.get_supported_models()
+                    if supported_models:
+                        user_model = next(iter(supported_models))  # Get first model
+                        # Update user's config with valid model
+                        self.set_user_config(user_id, model=user_model)
+                    else:
+                        user_model = "gpt-5"  # Ultimate fallback
+                
                 return {
-                    "model": result.get("model", "gpt-5"),
-                    "system_prompt": result.get("system_prompt", "Bạn là một trợ lý AI thông minh.")
+                    "model": user_model,
+                    "system_prompt": result.get("system_prompt", "Bạn tên là Mikaz (nữ), nói tiếng việt")
                 }
             else:
                 # Return default config
                 return {
                     "model": "gpt-5", 
-                    "system_prompt": "Bạn là một trợ lý AI thông minh."
+                    "system_prompt": "Bạn tên là Mikaz (nữ), nói tiếng việt"
                 }
         except Exception as e:
             logger.exception(f"Error getting user config for {user_id}: {e}")
-            return {"model": "gpt-5", "system_prompt": "Bạn là một trợ lý AI thông minh."}
+            return {"model": "gpt-5", "system_prompt": "Bạn tên là Mikaz (nữ), nói tiếng việt"}
     
     def set_user_config(self, user_id: int, model: Optional[str] = None, system_prompt: Optional[str] = None) -> bool:
         """Set user configuration"""
         try:
             update_data = {"updated_at": datetime.utcnow()}
             if model is not None:
+                # Validate model exists
+                if not self.model_exists(model):
+                    logger.warning(f"Attempt to set non-existent model {model} for user {user_id}")
+                    return False
                 update_data["model"] = model
             if system_prompt is not None:
                 update_data["system_prompt"] = system_prompt

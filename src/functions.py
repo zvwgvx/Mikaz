@@ -4,6 +4,7 @@
 # Bot helper / command registry
 # Uses MemoryStore for per‑user conversation history
 # Uses UserConfigManager for per-user model and system prompt settings
+# Uses MongoDB for model management
 # ────────────────────────────────────────────────────────────────────────
 
 import re
@@ -36,6 +37,10 @@ _request_queue = None
 # ---------------------------------------------------------------
 _authorized_users: Set[int] = set()
 
+# MongoDB storage globals
+_use_mongodb_auth = False
+_mongodb_store = None
+
 # ---------------------------------------------------------------
 # Attachment handling constants
 # ---------------------------------------------------------------
@@ -66,6 +71,7 @@ def load_authorized_from_path(path: Path) -> Set[int]:
         except Exception:
             logger.exception("Failed to load authorized.json, returning empty set.")
     return set()
+
 def save_authorized_to_path(path: Path, s: Set[int]) -> None:
     """Save authorized users to file (legacy mode)"""
     try:
@@ -222,26 +228,28 @@ async def help_cmd(ctx: commands.Context):
         "**Available commands:**",
         "`;getid [@member]` – Show your ID (or a mention). (everyone)",
         "`;ping` – Check bot responsiveness. (everyone)",
-        "`;setmodel <model>` – Set your preferred AI model. (authorized users)",
-        "`;setsprompt <prompt>` – Set your system prompt. (authorized users)", 
-        "`;showconfig` – Show your current model and system prompt. (authorized users)",
         "",
-        "**Supported models:** gpt-oss-120b, gpt-oss-20b, gpt-5, o3-mini, gpt-4.1",
-        "",
-        "**Attachment support:** when you attach a text/code file (.py, .txt, .md, .json, …)",
-        "the bot will read it and include its contents in the reply.",
+        "**Configuration commands (authorized users):**",
+        "`;set model <model>` – Set your preferred AI model.",
+        "`;set sys_prompt <prompt>` – Set your system prompt.", 
+        "`;show config` – Show your current configuration.",
+        "`;show model` – Show all supported models."
     ]
 
     if is_owner:
         lines += [
             "",
             "**Owner‑only commands:**",
-            "`;addid <id|@mention>` – Add a user to `authorized.json`.",
-            "`;removeid <id|@mention>` – Remove user from `authorized.json`.",
-            "`;listauth` – List authorized IDs.",
-            "`;memory` – View your conversation history.",
-            "`;clearmemory [@user]` – Clear a conversation history.",
+            "`;auth <id|@mention>` – Add a user to authorized list.",
+            "`;deauth <id|@mention>` – Remove user from authorized list.",
+            "`;show auth` – List authorized users.",
+            "`;memory [@user]` – View conversation history.",
+            "`;clearmemory [@user]` – Clear conversation history.",
             "",
+            "**Model management (owner only):**",
+            "`;add model <model_name>` – Add a new supported model.",
+            "`;remove model <model_name>` – Remove a supported model.",
+            "`;show models detailed` – Show detailed model information.",
         ]
 
     await ctx.send("\n".join(lines), allowed_mentions=discord.AllowedMentions.none())
@@ -253,7 +261,7 @@ async def getid_cmd(ctx: commands.Context, member: discord.Member = None):
     else:
         await ctx.send(f"{member} ID: {member.id}", allowed_mentions=discord.AllowedMentions.none())
 
-async def addid_cmd(ctx: commands.Context, id_or_mention: str):
+async def auth_cmd(ctx: commands.Context, id_or_mention: str):
     global _authorized_users
     uid = _extract_user_id_from_str(id_or_mention)
     if uid is None:
@@ -270,7 +278,7 @@ async def addid_cmd(ctx: commands.Context, id_or_mention: str):
     else:
         await ctx.send(f"Failed to add ID {uid} to authorized list.", allowed_mentions=discord.AllowedMentions.none())
 
-async def removeid_cmd(ctx: commands.Context, id_or_mention: str):
+async def deauth_cmd(ctx: commands.Context, id_or_mention: str):
     global _authorized_users
     uid = _extract_user_id_from_str(id_or_mention)
     if uid is None:
@@ -286,40 +294,6 @@ async def removeid_cmd(ctx: commands.Context, id_or_mention: str):
         await ctx.send(f"Removed ID {uid} from authorized list.", allowed_mentions=discord.AllowedMentions.none())
     else:
         await ctx.send(f"Failed to remove ID {uid} from authorized list.", allowed_mentions=discord.AllowedMentions.none())
-
-async def listauth_cmd(ctx: commands.Context):
-    if not _authorized_users:
-        await ctx.send("Authorized list is empty.", allowed_mentions=discord.AllowedMentions.none())
-        return
-
-    body = "\n".join(str(x) for x in sorted(_authorized_users))
-    if len(body) > 1900:
-        # For MongoDB mode, create a temporary text with the list
-        if _use_mongodb_auth:
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-                f.write("Authorized Users:\n")
-                f.write(body)
-                temp_path = f.name
-            
-            try:
-                await ctx.send("List too long, sending as file.", 
-                             allowed_mentions=discord.AllowedMentions.none(),
-                             file=discord.File(temp_path, filename="authorized_users.txt"))
-            finally:
-                Path(temp_path).unlink(missing_ok=True)
-        else:
-            # File mode - use existing file
-            fp = _config.AUTHORIZED_STORE if _config.AUTHORIZED_STORE.exists() else None
-            if fp:
-                await ctx.send("List too long, sending authorized.json file.", 
-                             allowed_mentions=discord.AllowedMentions.none(), 
-                             file=discord.File(fp))
-            else:
-                await ctx.send("List too long, authorized.json not found.", 
-                             allowed_mentions=discord.AllowedMentions.none())
-    else:
-        await ctx.send(f"Authorized IDs:\n{body}", allowed_mentions=discord.AllowedMentions.none())
 
 async def ping_cmd(ctx: commands.Context):
     import time
@@ -372,71 +346,286 @@ async def clearmemory_cmd(ctx: commands.Context, target: discord.Member = None):
     await ctx.send(f"Cleared memory for {target}.", allowed_mentions=discord.AllowedMentions.none())
 
 # ------------------------------------------------------------------
-# User configuration commands
+# NEW: Add command dispatcher (owner only)
 # ------------------------------------------------------------------
-async def setmodel_cmd(ctx: commands.Context, *, model: str = None):
-    """Set user's preferred AI model."""
-    # Check authorization
-    if not await is_authorized_user(ctx.author):
-        await ctx.send("Bạn không có quyền sử dụng lệnh này.", allowed_mentions=discord.AllowedMentions.none())
-        return
-    
-    if model is None:
-        from user_config import SUPPORTED_MODELS
-        supported_list = ", ".join(sorted(SUPPORTED_MODELS))
-        await ctx.send(f"Vui lòng chỉ định model. Ví dụ: `;setmodel gpt-oss-120b`\n**Các model có sẵn:** {supported_list}", 
+async def add_cmd(ctx: commands.Context, resource_type: str = None, *, value: str = None):
+    """Add command dispatcher - handles: add model <model_name>"""
+    # Check if user is owner
+    try:
+        is_owner = await _bot.is_owner(ctx.author)
+    except Exception:
+        is_owner = False
+        
+    if not is_owner:
+        await ctx.send("This command is only available to the bot owner.", 
                       allowed_mentions=discord.AllowedMentions.none())
         return
     
-    model = model.strip()
-    success, message = _user_config_manager.set_user_model(ctx.author.id, model)
-    await ctx.send(message, allowed_mentions=discord.AllowedMentions.none())
-
-
-async def setsprompt_cmd(ctx: commands.Context, *, prompt: str = None):
-    """Set user's system prompt."""
-    # Check authorization
-    if not await is_authorized_user(ctx.author):
-        await ctx.send("Bạn không có quyền sử dụng lệnh này.", allowed_mentions=discord.AllowedMentions.none())
-        return
-    
-    if prompt is None:
-        await ctx.send("Vui lòng cung cấp system prompt. Ví dụ: `;setsprompt Bạn là một trợ lý AI thông minh`", 
+    if resource_type is None:
+        await ctx.send("Usage: `;add model <model_name>`", 
                       allowed_mentions=discord.AllowedMentions.none())
         return
     
-    success, message = _user_config_manager.set_user_system_prompt(ctx.author.id, prompt)
-    await ctx.send(message, allowed_mentions=discord.AllowedMentions.none())
+    resource_type = resource_type.lower()
+    
+    if resource_type == "model":
+        if value is None:
+            await ctx.send("Please specify a model name. Example: `;add model gpt-6`", 
+                          allowed_mentions=discord.AllowedMentions.none())
+            return
+        
+        model_name = value.strip()
+        if not model_name:
+            await ctx.send("Model name cannot be empty.", 
+                          allowed_mentions=discord.AllowedMentions.none())
+            return
+        
+        # Check if MongoDB is enabled
+        if not _config.USE_MONGODB:
+            await ctx.send("Model management requires MongoDB mode to be enabled.", 
+                          allowed_mentions=discord.AllowedMentions.none())
+            return
+        
+        success, message = _user_config_manager.add_supported_model(model_name)
+        await ctx.send(message, allowed_mentions=discord.AllowedMentions.none())
+        
+    else:
+        await ctx.send(f"Unknown resource type '{resource_type}'. Available: `model`", 
+                      allowed_mentions=discord.AllowedMentions.none())
 
-
-async def showconfig_cmd(ctx: commands.Context):
-    """Show user's current configuration."""
-    # Check authorization
-    if not await is_authorized_user(ctx.author):
-        await ctx.send("Bạn không có quyền sử dụng lệnh này.", allowed_mentions=discord.AllowedMentions.none())
+# ------------------------------------------------------------------
+# NEW: Remove command dispatcher (owner only)
+# ------------------------------------------------------------------
+async def remove_cmd(ctx: commands.Context, resource_type: str = None, *, value: str = None):
+    """Remove command dispatcher - handles: remove model <model_name>"""
+    # Check if user is owner
+    try:
+        is_owner = await _bot.is_owner(ctx.author)
+    except Exception:
+        is_owner = False
+        
+    if not is_owner:
+        await ctx.send("This command is only available to the bot owner.", 
+                      allowed_mentions=discord.AllowedMentions.none())
         return
     
-    user_config = _user_config_manager.get_user_config(ctx.author.id)
+    if resource_type is None:
+        await ctx.send("Usage: `;remove model <model_name>`", 
+                      allowed_mentions=discord.AllowedMentions.none())
+        return
     
-    model = user_config["model"]
-    prompt = user_config["system_prompt"]
+    resource_type = resource_type.lower()
     
-    # Truncate prompt if too long for display
-    display_prompt = prompt
-    if len(prompt) > 500:
-        display_prompt = prompt[:500] + "...[truncated]"
+    if resource_type == "model":
+        if value is None:
+            await ctx.send("Please specify a model name. Example: `;remove model old-model`", 
+                          allowed_mentions=discord.AllowedMentions.none())
+            return
+        
+        model_name = value.strip()
+        if not model_name:
+            await ctx.send("Model name cannot be empty.", 
+                          allowed_mentions=discord.AllowedMentions.none())
+            return
+        
+        # Check if MongoDB is enabled
+        if not _config.USE_MONGODB:
+            await ctx.send("Model management requires MongoDB mode to be enabled.", 
+                          allowed_mentions=discord.AllowedMentions.none())
+            return
+        
+        success, message = _user_config_manager.remove_supported_model(model_name)
+        await ctx.send(message, allowed_mentions=discord.AllowedMentions.none())
+        
+    else:
+        await ctx.send(f"Unknown resource type '{resource_type}'. Available: `model`", 
+                      allowed_mentions=discord.AllowedMentions.none())
+
+# ------------------------------------------------------------------
+# Set command dispatcher (updated)
+# ------------------------------------------------------------------
+async def set_cmd(ctx: commands.Context, attribute: str = None, *, value: str = None):
+    """Set command dispatcher - handles: set model <model>, set sys_prompt <prompt>"""
+    # Check authorization
+    if not await is_authorized_user(ctx.author):
+        await ctx.send("You do not have permission to use this command.", allowed_mentions=discord.AllowedMentions.none())
+        return
     
-    lines = [
-        "**Cấu hình hiện tại của bạn:**",
-        f"**Model:** `{model}`",
-        f"**System Prompt:**",
-        f"```",
-        display_prompt,
-        f"```"
-    ]
+    if attribute is None:
+        await ctx.send("Usage: `;set model <model>` or `;set sys_prompt <prompt>`", 
+                      allowed_mentions=discord.AllowedMentions.none())
+        return
     
-    await ctx.send("\n".join(lines), allowed_mentions=discord.AllowedMentions.none())
+    attribute = attribute.lower()
     
+    if attribute == "model":
+        if value is None:
+            # Get supported models from database
+            supported_models = _user_config_manager.get_supported_models()
+            supported_list = ", ".join(sorted(supported_models))
+            await ctx.send(f"Please specify a model. Example: `;set model gpt-oss-120b`\n**Available models:** {supported_list}", 
+                          allowed_mentions=discord.AllowedMentions.none())
+            return
+        
+        success, message = _user_config_manager.set_user_model(ctx.author.id, value.strip())
+        await ctx.send(message, allowed_mentions=discord.AllowedMentions.none())
+        
+    elif attribute == "sys_prompt":
+        if value is None:
+            await ctx.send("Please provide a system prompt. Example: `;set sys_prompt You are a helpful AI assistant`", 
+                          allowed_mentions=discord.AllowedMentions.none())
+            return
+        
+        success, message = _user_config_manager.set_user_system_prompt(ctx.author.id, value)
+        await ctx.send(message, allowed_mentions=discord.AllowedMentions.none())
+        
+    else:
+        await ctx.send(f"Unknown attribute '{attribute}'. Use: `model` or `sys_prompt`", 
+                      allowed_mentions=discord.AllowedMentions.none())
+
+# ------------------------------------------------------------------
+# Show command dispatcher (updated)
+# ------------------------------------------------------------------
+async def show_cmd(ctx: commands.Context, item: str = None, detail: str = None):
+    """Show command dispatcher - handles: show config, show model, show models detailed, show auth"""
+    
+    if item is None:
+        await ctx.send("Usage: `;show config`, `;show model`, `;show models detailed` (owner), or `;show auth` (owner)", 
+                      allowed_mentions=discord.AllowedMentions.none())
+        return
+    
+    item = item.lower()
+    
+    if item == "config":
+        # Check authorization for config
+        if not await is_authorized_user(ctx.author):
+            await ctx.send("Bạn không có quyền sử dụng lệnh này.", allowed_mentions=discord.AllowedMentions.none())
+            return
+        
+        user_config = _user_config_manager.get_user_config(ctx.author.id)
+        
+        model = user_config["model"]
+        prompt = user_config["system_prompt"]
+        
+        # Truncate prompt if too long for display
+        display_prompt = prompt
+        if len(prompt) > 500:
+            display_prompt = prompt[:500] + "...[truncated]"
+        
+        lines = [
+            "**Your current configuration:**",
+            f"**Model:** `{model}`",
+            f"**System Prompt:**",
+            f"```",
+            display_prompt,
+            f"```"
+        ]
+        
+        await ctx.send("\n".join(lines), allowed_mentions=discord.AllowedMentions.none())
+        
+    elif item == "model" or item == "models":
+        if detail and detail.lower() == "detailed":
+            # Check if user is owner for detailed view
+            try:
+                is_owner = await _bot.is_owner(ctx.author)
+            except Exception:
+                is_owner = False
+                
+            if not is_owner:
+                await ctx.send("Detailed model information is only available to the bot owner.", 
+                              allowed_mentions=discord.AllowedMentions.none())
+                return
+            
+            if not _config.USE_MONGODB:
+                await ctx.send("Detailed model information requires MongoDB mode.", 
+                              allowed_mentions=discord.AllowedMentions.none())
+                return
+            
+            # Get detailed model information
+            detailed_models = _user_config_manager.list_all_models_detailed()
+            if not detailed_models:
+                await ctx.send("No models found in database.", allowed_mentions=discord.AllowedMentions.none())
+                return
+            
+            lines = ["**Detailed Model Information:**"]
+            for model in detailed_models:
+                model_name = model.get("model_name", "Unknown")
+                created_at = model.get("created_at", "Unknown")
+                is_default = model.get("is_default", False)
+                
+                status = "Default" if is_default else "Custom"
+                lines.append(f"• `{model_name}` - {status} (Created: {created_at})")
+            
+            # Check if message is too long
+            content = "\n".join(lines)
+            if len(content) > 1900:
+                # Split into multiple messages
+                await send_long_message(ctx.channel, content, 1900)
+            else:
+                await ctx.send(content, allowed_mentions=discord.AllowedMentions.none())
+        else:
+            # Regular model list
+            supported_models = _user_config_manager.get_supported_models()
+            supported_list = "\n".join(f"• `{model}`" for model in sorted(supported_models))
+            
+            lines = [
+                "**Supported AI Models:**",
+                supported_list,
+                "",
+                "Use `;set model <model_name>` to change your model."
+            ]
+            
+            await ctx.send("\n".join(lines), allowed_mentions=discord.AllowedMentions.none())
+        
+    elif item == "auth":
+        # Check if user is owner
+        try:
+            is_owner = await _bot.is_owner(ctx.author)
+        except Exception:
+            is_owner = False
+            
+        if not is_owner:
+            await ctx.send("This command is only available to the bot owner.", 
+                          allowed_mentions=discord.AllowedMentions.none())
+            return
+        
+        if not _authorized_users:
+            await ctx.send("Authorized list is empty.", allowed_mentions=discord.AllowedMentions.none())
+            return
+
+        body = "\n".join(str(x) for x in sorted(_authorized_users))
+        if len(body) > 1900:
+            # For MongoDB mode, create a temporary text with the list
+            if _use_mongodb_auth:
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                    f.write("Authorized Users:\n")
+                    f.write(body)
+                    temp_path = f.name
+                
+                try:
+                    await ctx.send("List too long, sending as file.", 
+                                 allowed_mentions=discord.AllowedMentions.none(),
+                                 file=discord.File(temp_path, filename="authorized_users.txt"))
+                finally:
+                    Path(temp_path).unlink(missing_ok=True)
+            else:
+                # File mode - use existing file
+                fp = _config.AUTHORIZED_STORE if _config.AUTHORIZED_STORE.exists() else None
+                if fp:
+                    await ctx.send("List too long, sending authorized.json file.", 
+                                 allowed_mentions=discord.AllowedMentions.none(), 
+                                 file=discord.File(fp))
+                else:
+                    await ctx.send("List too long, authorized.json not found.", 
+                                 allowed_mentions=discord.AllowedMentions.none())
+        else:
+            await ctx.send(f"**Authorized Users:**\n{body}", allowed_mentions=discord.AllowedMentions.none())
+            
+    else:
+        await ctx.send(f"Unknown item '{item}'. Use: `config`, `model`, `models detailed` (owner), or `auth` (owner)", 
+                      allowed_mentions=discord.AllowedMentions.none())
+
 # ------------------------------------------------------------------
 # AI Request Processing Function (used by queue)
 # ------------------------------------------------------------------
@@ -910,9 +1099,6 @@ async def on_message(message: discord.Message):
         )
 
 # ------------------------------------------------------------------
-# Setup – register commands, listeners, load data
-# ------------------------------------------------------------------
-# ------------------------------------------------------------------
 # Setup – register commands, listeners, load data (updated for MongoDB)
 # ------------------------------------------------------------------
 def setup(bot: commands.Bot, call_api_module, config_module):
@@ -970,17 +1156,20 @@ def setup(bot: commands.Bot, call_api_module, config_module):
     bot.add_command(commands.Command(getid_cmd, name="getid"))
     bot.add_command(commands.Command(ping_cmd, name="ping"))
 
-    # User config commands (authorized users only) - authorization checked inside each command
-    bot.add_command(commands.Command(setmodel_cmd, name="setmodel"))
-    bot.add_command(commands.Command(setsprompt_cmd, name="setsprompt"))  
-    bot.add_command(commands.Command(showconfig_cmd, name="showconfig"))
+    # Set and Show commands
+    bot.add_command(commands.Command(set_cmd, name="set"))
+    bot.add_command(commands.Command(show_cmd, name="show"))
 
+    # Owner commands
     owner_check = commands.is_owner()
-    bot.add_command(commands.Command(addid_cmd, name="addid", checks=[owner_check]))
-    bot.add_command(commands.Command(removeid_cmd, name="removeid", checks=[owner_check]))
-    bot.add_command(commands.Command(listauth_cmd, name="listauth", checks=[owner_check]))
+    bot.add_command(commands.Command(auth_cmd, name="auth", checks=[owner_check]))
+    bot.add_command(commands.Command(deauth_cmd, name="deauth", checks=[owner_check]))
     bot.add_command(commands.Command(memory_cmd, name="memory", checks=[owner_check]))
     bot.add_command(commands.Command(clearmemory_cmd, name="clearmemory", checks=[owner_check]))
+    
+    # NEW: Model management commands (owner only)
+    bot.add_command(commands.Command(add_cmd, name="add", checks=[owner_check]))
+    bot.add_command(commands.Command(remove_cmd, name="remove", checks=[owner_check]))
 
     # ------------------------------------------------------------------
     # Register on_message listener if not already present

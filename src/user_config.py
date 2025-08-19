@@ -5,7 +5,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Set
 import load_config
 
 logger = logging.getLogger("discord-openai-proxy.user_config")
@@ -15,8 +15,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 CONF_DIR = BASE_DIR / "config"
 USER_CONFIG_FILE = CONF_DIR / "user_config.json"
 
-# Models được hỗ trợ
-SUPPORTED_MODELS = {
+# Models được hỗ trợ (FALLBACK - sẽ được lấy từ database)
+FALLBACK_SUPPORTED_MODELS = {
     "o3-mini",
     "gpt-4.1",
     "gpt-5",
@@ -91,6 +91,41 @@ class UserConfigManager:
         except Exception as e:
             logger.exception(f"Error saving user_config.json: {e}")
     
+    def get_supported_models(self) -> Set[str]:
+        """Get supported models from database (or fallback for file mode)"""
+        if self.use_mongodb:
+            return self.mongo_store.get_supported_models()
+        else:
+            # File mode fallback
+            return FALLBACK_SUPPORTED_MODELS
+    
+    def add_supported_model(self, model_name: str) -> tuple[bool, str]:
+        """
+        Add a new supported model (MongoDB only)
+        Returns: (success: bool, message: str)
+        """
+        if not self.use_mongodb:
+            return False, "Model management requires MongoDB mode"
+        
+        return self.mongo_store.add_supported_model(model_name)
+    
+    def remove_supported_model(self, model_name: str) -> tuple[bool, str]:
+        """
+        Remove a supported model (MongoDB only)
+        Returns: (success: bool, message: str)
+        """
+        if not self.use_mongodb:
+            return False, "Model management requires MongoDB mode"
+        
+        return self.mongo_store.remove_supported_model(model_name)
+    
+    def list_all_models_detailed(self) -> list:
+        """Get detailed list of all models (MongoDB only)"""
+        if not self.use_mongodb:
+            return []
+        
+        return self.mongo_store.list_all_models()
+    
     def get_user_config(self, user_id: int) -> Dict[str, Any]:
         """Lấy cấu hình của user, tạo mặc định nếu chưa có"""
         if self.use_mongodb:
@@ -111,8 +146,9 @@ class UserConfigManager:
         Đặt model cho user
         Returns: (success: bool, message: str)
         """
-        if model not in SUPPORTED_MODELS:
-            supported_list = ", ".join(sorted(SUPPORTED_MODELS))
+        supported_models = self.get_supported_models()
+        if model not in supported_models:
+            supported_list = ", ".join(sorted(supported_models))
             return False, f"Model '{model}' không được hỗ trợ. Các model có sẵn: {supported_list}"
         
         if self.use_mongodb:
@@ -179,7 +215,7 @@ class UserConfigManager:
     def reset_user_config(self, user_id: int) -> str:
         """Reset cấu hình user về mặc định"""
         if self.use_mongodb:
-            # Delete config from MongoDB so it falls back to defaults
+            # Reset config in MongoDB
             success = self.mongo_store.set_user_config(user_id, model=DEFAULT_MODEL, system_prompt=DEFAULT_SYSTEM_PROMPT)
             if success:
                 return "Đã reset cấu hình về mặc định"
@@ -203,3 +239,12 @@ def get_user_config_manager() -> UserConfigManager:
     if _user_config_manager is None:
         _user_config_manager = UserConfigManager()
     return _user_config_manager
+
+# Legacy functions for backward compatibility (DEPRECATED)
+def get_supported_models() -> Set[str]:
+    """DEPRECATED: Use get_user_config_manager().get_supported_models() instead"""
+    logger.warning("get_supported_models() is deprecated. Use get_user_config_manager().get_supported_models()")
+    return get_user_config_manager().get_supported_models()
+
+# Make supported models available as module variable for backward compatibility
+SUPPORTED_MODELS = FALLBACK_SUPPORTED_MODELS  # This will be updated dynamically
