@@ -232,7 +232,7 @@ async def help_cmd(ctx: commands.Context):
         "**Configuration commands (authorized users):**",
         "`;set model <model>` – Set your preferred AI model.",
         "`;set sys_prompt <prompt>` – Set your system prompt.", 
-        "`;show config` – Show your current configuration.",
+        "`;show profile` – Show your current configuration.",
         "`;show model` – Show all supported models."
     ]
 
@@ -247,9 +247,10 @@ async def help_cmd(ctx: commands.Context):
             "`;clearmemory [@user]` – Clear conversation history.",
             "",
             "**Model management (owner only):**",
-            "`;add model <model_name>` – Add a new supported model.",
-            "`;remove model <model_name>` – Remove a supported model.",
-            "`;show models detailed` – Show detailed model information.",
+            "`;add model <model_name> <credit_cost> <access_level>` – Add a new model",
+            "  - credit_cost: Cost in credits per use",
+            "  - access_level: Required user level (0=Basic, 1=Advanced, 2=Premium)",
+            "`;remove model <model_name>` – Remove a model",
         ]
 
     await ctx.send("\n".join(lines), allowed_mentions=discord.AllowedMentions.none())
@@ -301,13 +302,13 @@ async def ping_cmd(ctx: commands.Context):
     message = await ctx.send("Pinging...", allowed_mentions=discord.AllowedMentions.none())
     end_time = time.perf_counter()
     
-    # Tính thời gian phản hồi (ms)
+    # Calculate response time (ms)
     latency_ms = round((end_time - start_time) * 1000)
     
-    # Lấy WebSocket latency của bot (nếu có)
+    # Get bot's WebSocket latency (if available)
     ws_latency = round(_bot.latency * 1000) if _bot.latency else "N/A"
     
-    # Cập nhật tin nhắn với thông tin chi tiết
+    # Update message with detailed info
     content = f"Pong! \nResponse: {latency_ms} ms\nWebSocket: {ws_latency} ms"
     await message.edit(content=content, allowed_mentions=discord.AllowedMentions.none())
 
@@ -349,8 +350,7 @@ async def clearmemory_cmd(ctx: commands.Context, target: discord.Member = None):
 # NEW: Add command dispatcher (owner only)
 # ------------------------------------------------------------------
 async def add_cmd(ctx: commands.Context, resource_type: str = None, *, value: str = None):
-    """Add command dispatcher - handles: add model <model_name>"""
-    # Check if user is owner
+    """Add command dispatcher - handles: add model <model_name> <credit_cost> <access_level>, add credit @user <amount>"""
     try:
         is_owner = await _bot.is_owner(ctx.author)
     except Exception:
@@ -362,35 +362,86 @@ async def add_cmd(ctx: commands.Context, resource_type: str = None, *, value: st
         return
     
     if resource_type is None:
-        await ctx.send("Usage: `;add model <model_name>`", 
+        await ctx.send("Usage:\n`;add model <model_name> <credit_cost> <access_level>`\n`;add credit @user <amount>`", 
                       allowed_mentions=discord.AllowedMentions.none())
         return
     
     resource_type = resource_type.lower()
     
     if resource_type == "model":
-        if value is None:
-            await ctx.send("Please specify a model name. Example: `;add model gpt-6`", 
+        if not value:
+            await ctx.send("Usage: `;add model <model_name> <credit_cost> <access_level>`\nExample: `;add model gpt-6 5 2`", 
                           allowed_mentions=discord.AllowedMentions.none())
             return
-        
-        model_name = value.strip()
-        if not model_name:
-            await ctx.send("Model name cannot be empty.", 
-                          allowed_mentions=discord.AllowedMentions.none())
+            
+        # Parse arguments
+        try:
+            args = value.split()
+            if len(args) != 3:
+                raise ValueError("Need model_name, credit_cost and access_level")
+                
+            model_name = args[0].strip()
+            credit_cost = int(args[1])
+            access_level = int(args[2])
+            
+            if not model_name:
+                raise ValueError("Model name cannot be empty")
+                
+            if credit_cost < 0:
+                raise ValueError("Credit cost must be positive")
+                
+            if access_level not in [0, 1, 2]:
+                raise ValueError("Access level must be 0, 1, or 2")
+                
+        except ValueError as e:
+            await ctx.send(f"Error: {str(e)}", allowed_mentions=discord.AllowedMentions.none())
             return
-        
+            
         # Check if MongoDB is enabled
         if not _config.USE_MONGODB:
             await ctx.send("Model management requires MongoDB mode to be enabled.", 
                           allowed_mentions=discord.AllowedMentions.none())
             return
         
-        success, message = _user_config_manager.add_supported_model(model_name)
+        success, message = _mongodb_store.add_supported_model(model_name, credit_cost, access_level)
         await ctx.send(message, allowed_mentions=discord.AllowedMentions.none())
         
+    elif resource_type == "credit":
+        if not value:
+            await ctx.send("Usage: `;add credit @user <amount>`", 
+                          allowed_mentions=discord.AllowedMentions.none())
+            return
+            
+        # Parse arguments
+        try:
+            args = value.split()
+            if len(args) != 2:
+                raise ValueError("Need both user mention and amount")
+                
+            # Get user from mention
+            target_user = await commands.MemberConverter().convert(ctx, args[0])
+            amount = int(args[1])
+            
+            if amount <= 0:
+                raise ValueError("Amount must be positive")
+                
+        except (ValueError, commands.MemberNotFound) as e:
+            await ctx.send(f"Error: {str(e)}", allowed_mentions=discord.AllowedMentions.none())
+            return
+            
+        if _use_mongodb_auth:
+            success, new_balance = _mongodb_store.add_user_credit(target_user.id, amount)
+            if success:
+                await ctx.send(f"Added {amount} credits to {target_user}'s balance. New balance: {new_balance}", 
+                              allowed_mentions=discord.AllowedMentions.none())
+            else:
+                await ctx.send("Failed to add credits", 
+                              allowed_mentions=discord.AllowedMentions.none())
+        else:
+            await ctx.send("Credit system requires MongoDB mode", 
+                          allowed_mentions=discord.AllowedMentions.none())
     else:
-        await ctx.send(f"Unknown resource type '{resource_type}'. Available: `model`", 
+        await ctx.send(f"Unknown resource type '{resource_type}'. Available: `model` or `credit`", 
                       allowed_mentions=discord.AllowedMentions.none())
 
 # ------------------------------------------------------------------
@@ -434,7 +485,71 @@ async def remove_cmd(ctx: commands.Context, resource_type: str = None, *, value:
                           allowed_mentions=discord.AllowedMentions.none())
             return
         
-        success, message = _user_config_manager.remove_supported_model(model_name)
+        success, message = _mongodb_store.remove_supported_model(model_name)
+        await ctx.send(message, allowed_mentions=discord.AllowedMentions.none())
+        
+    else:
+        await ctx.send(f"Unknown resource type '{resource_type}'. Available: `model`", 
+                      allowed_mentions=discord.AllowedMentions.none())
+
+# ------------------------------------------------------------------
+# NEW: Edit command dispatcher (owner only)
+# ------------------------------------------------------------------
+async def edit_cmd(ctx: commands.Context, resource_type: str = None, *, value: str = None):
+    """Edit command dispatcher - handles: edit model <model_name> <credit_cost> <access_level>"""
+    try:
+        is_owner = await _bot.is_owner(ctx.author)
+    except Exception:
+        is_owner = False
+        
+    if not is_owner:
+        await ctx.send("This command is only available to the bot owner.", 
+                      allowed_mentions=discord.AllowedMentions.none())
+        return
+    
+    if resource_type is None:
+        await ctx.send("Usage:\n`;edit model <model_name> <credit_cost> <access_level>`", 
+                      allowed_mentions=discord.AllowedMentions.none())
+        return
+    
+    resource_type = resource_type.lower()
+    
+    if resource_type == "model":
+        if not value:
+            await ctx.send("Usage: `;edit model <model_name> <credit_cost> <access_level>`\nExample: `;edit model gpt-6 10 2`", 
+                          allowed_mentions=discord.AllowedMentions.none())
+            return
+            
+        # Parse arguments
+        try:
+            args = value.split()
+            if len(args) != 3:
+                raise ValueError("Need model_name, credit_cost and access_level")
+                
+            model_name = args[0].strip()
+            credit_cost = int(args[1])
+            access_level = int(args[2])
+            
+            if not model_name:
+                raise ValueError("Model name cannot be empty")
+                
+            if credit_cost < 0:
+                raise ValueError("Credit cost must be positive")
+                
+            if access_level not in [0, 1, 2]:
+                raise ValueError("Access level must be 0, 1, or 2")
+                
+        except ValueError as e:
+            await ctx.send(f"Error: {str(e)}", allowed_mentions=discord.AllowedMentions.none())
+            return
+            
+        # Check if MongoDB is enabled
+        if not _config.USE_MONGODB:
+            await ctx.send("Model management requires MongoDB mode to be enabled.", 
+                          allowed_mentions=discord.AllowedMentions.none())
+            return
+        
+        success, message = _mongodb_store.edit_supported_model(model_name, credit_cost, access_level)
         await ctx.send(message, allowed_mentions=discord.AllowedMentions.none())
         
     else:
@@ -445,14 +560,15 @@ async def remove_cmd(ctx: commands.Context, resource_type: str = None, *, value:
 # Set command dispatcher (updated)
 # ------------------------------------------------------------------
 async def set_cmd(ctx: commands.Context, attribute: str = None, *, value: str = None):
-    """Set command dispatcher - handles: set model <model>, set sys_prompt <prompt>"""
+    """Set command dispatcher - handles: set model <model>, set sys_prompt <prompt>, set level @user <level>"""
     # Check authorization
     if not await is_authorized_user(ctx.author):
-        await ctx.send("You do not have permission to use this command.", allowed_mentions=discord.AllowedMentions.none())
+        await ctx.send("You do not have permission to use this command.", 
+                      allowed_mentions=discord.AllowedMentions.none())
         return
     
     if attribute is None:
-        await ctx.send("Usage: `;set model <model>` or `;set sys_prompt <prompt>`", 
+        await ctx.send("Usage:\n`;set model <model>`\n`;set sys_prompt <prompt>`\n`;set level @user <level>`", 
                       allowed_mentions=discord.AllowedMentions.none())
         return
     
@@ -467,6 +583,12 @@ async def set_cmd(ctx: commands.Context, attribute: str = None, *, value: str = 
                           allowed_mentions=discord.AllowedMentions.none())
             return
         
+        # Check model availability before setting
+        available, error = _call_api.is_model_available(value.strip())
+        if not available:
+            await ctx.send(error, allowed_mentions=discord.AllowedMentions.none())
+            return
+        
         success, message = _user_config_manager.set_user_model(ctx.author.id, value.strip())
         await ctx.send(message, allowed_mentions=discord.AllowedMentions.none())
         
@@ -479,105 +601,7 @@ async def set_cmd(ctx: commands.Context, attribute: str = None, *, value: str = 
         success, message = _user_config_manager.set_user_system_prompt(ctx.author.id, value)
         await ctx.send(message, allowed_mentions=discord.AllowedMentions.none())
         
-    else:
-        await ctx.send(f"Unknown attribute '{attribute}'. Use: `model` or `sys_prompt`", 
-                      allowed_mentions=discord.AllowedMentions.none())
-
-# ------------------------------------------------------------------
-# Show command dispatcher (updated)
-# ------------------------------------------------------------------
-async def show_cmd(ctx: commands.Context, item: str = None, detail: str = None):
-    """Show command dispatcher - handles: show config, show model, show models detailed, show auth"""
-    
-    if item is None:
-        await ctx.send("Usage: `;show config`, `;show model`, `;show models detailed` (owner), or `;show auth` (owner)", 
-                      allowed_mentions=discord.AllowedMentions.none())
-        return
-    
-    item = item.lower()
-    
-    if item == "config":
-        # Check authorization for config
-        if not await is_authorized_user(ctx.author):
-            await ctx.send("Bạn không có quyền sử dụng lệnh này.", allowed_mentions=discord.AllowedMentions.none())
-            return
-        
-        user_config = _user_config_manager.get_user_config(ctx.author.id)
-        
-        model = user_config["model"]
-        prompt = user_config["system_prompt"]
-        
-        # Truncate prompt if too long for display
-        display_prompt = prompt
-        if len(prompt) > 500:
-            display_prompt = prompt[:500] + "...[truncated]"
-        
-        lines = [
-            "**Your current configuration:**",
-            f"**Model:** `{model}`",
-            f"**System Prompt:**",
-            f"```",
-            display_prompt,
-            f"```"
-        ]
-        
-        await ctx.send("\n".join(lines), allowed_mentions=discord.AllowedMentions.none())
-        
-    elif item == "model" or item == "models":
-        if detail and detail.lower() == "detailed":
-            # Check if user is owner for detailed view
-            try:
-                is_owner = await _bot.is_owner(ctx.author)
-            except Exception:
-                is_owner = False
-                
-            if not is_owner:
-                await ctx.send("Detailed model information is only available to the bot owner.", 
-                              allowed_mentions=discord.AllowedMentions.none())
-                return
-            
-            if not _config.USE_MONGODB:
-                await ctx.send("Detailed model information requires MongoDB mode.", 
-                              allowed_mentions=discord.AllowedMentions.none())
-                return
-            
-            # Get detailed model information
-            detailed_models = _user_config_manager.list_all_models_detailed()
-            if not detailed_models:
-                await ctx.send("No models found in database.", allowed_mentions=discord.AllowedMentions.none())
-                return
-            
-            lines = ["**Detailed Model Information:**"]
-            for model in detailed_models:
-                model_name = model.get("model_name", "Unknown")
-                created_at = model.get("created_at", "Unknown")
-                is_default = model.get("is_default", False)
-                
-                status = "Default" if is_default else "Custom"
-                lines.append(f"• `{model_name}` - {status} (Created: {created_at})")
-            
-            # Check if message is too long
-            content = "\n".join(lines)
-            if len(content) > 1900:
-                # Split into multiple messages
-                await send_long_message(ctx.channel, content, 1900)
-            else:
-                await ctx.send(content, allowed_mentions=discord.AllowedMentions.none())
-        else:
-            # Regular model list
-            supported_models = _user_config_manager.get_supported_models()
-            supported_list = "\n".join(f"• `{model}`" for model in sorted(supported_models))
-            
-            lines = [
-                "**Supported AI Models:**",
-                supported_list,
-                "",
-                "Use `;set model <model_name>` to change your model."
-            ]
-            
-            await ctx.send("\n".join(lines), allowed_mentions=discord.AllowedMentions.none())
-        
-    elif item == "auth":
+    elif attribute == "level":
         # Check if user is owner
         try:
             is_owner = await _bot.is_owner(ctx.author)
@@ -585,47 +609,236 @@ async def show_cmd(ctx: commands.Context, item: str = None, detail: str = None):
             is_owner = False
             
         if not is_owner:
-            await ctx.send("This command is only available to the bot owner.", 
+            await ctx.send("Only the bot owner can set user levels.", 
                           allowed_mentions=discord.AllowedMentions.none())
             return
+            
+        if not value:
+            await ctx.send("Usage: `;set level @user <level>` (0=Basic, 1=Advanced, 2=Premium)", 
+                          allowed_mentions=discord.AllowedMentions.none())
+            return
+            
+        # Parse arguments
+        try:
+            args = value.split()
+            if len(args) != 2:
+                raise ValueError("Need both user mention and level")
+                
+            # Get user from mention
+            target_user = await commands.MemberConverter().convert(ctx, args[0])
+            level = int(args[1])
+            
+            if level not in [0, 1, 2]:
+                raise ValueError("Level must be 0, 1, or 2")
+                
+        except (ValueError, commands.MemberNotFound) as e:
+            await ctx.send(f"Error: {str(e)}", allowed_mentions=discord.AllowedMentions.none())
+            return
+            
+        if _use_mongodb_auth:
+            success = _mongodb_store.set_user_level(target_user.id, level)
+            if success:
+                level_names = {0: "Basic", 1: "Advanced", 2: "Premium"}
+                await ctx.send(f"Set {target_user}'s level to {level_names[level]} (Level {level})", 
+                              allowed_mentions=discord.AllowedMentions.none())
+            else:
+                await ctx.send("Failed to set user level", 
+                              allowed_mentions=discord.AllowedMentions.none())
+        else:
+            await ctx.send("User levels require MongoDB mode", 
+                          allowed_mentions=discord.AllowedMentions.none())
+            
+    else:
+        await ctx.send(f"Unknown attribute '{attribute}'. Use: `model`, `sys_prompt`, or `level`", 
+                      allowed_mentions=discord.AllowedMentions.none())
+
+# ------------------------------------------------------------------
+# Show command dispatcher (updated)
+# ------------------------------------------------------------------
+async def show_cmd(ctx: commands.Context, item: str = None, detail_or_user: str = None):
+    """Show command dispatcher - handles: show profile, show profile @user (owner), show model, show models detailed, show auth"""
+    if item is None:
+        await ctx.send("Usage: `;show profile`, `;show profile @user` (owner), `;show model`, `;show models detailed` (owner), or `;show auth` (owner)", 
+                      allowed_mentions=discord.AllowedMentions.none())
+        return
+    
+    item = item.lower()
+    
+    if item == "profile":
+        # The profile command is public: **anyone** can invoke it.
+        # Optional target member: 1st argument if present.
+        target_user: Optional[discord.Member] = None
+        if detail_or_user:
+            target_arg = detail_or_user
+            try:
+                # Try to resolve a Member from the argument
+                target_user = await commands.MemberConverter().convert(ctx, target_arg)
+            except Exception:
+                # Maybe it's a raw ID
+                try:
+                    uid = int(target_arg)
+                    guild = ctx.guild
+                    if guild:
+                        target_user = await guild.fetch_member(uid)
+                except Exception:
+                    pass
+
+        else:
+            # No target specified => show own profile
+            target_user = ctx.author
+
+        if target_user is None:
+            await ctx.send(
+                f"Could not find member `{target_arg}`.",
+                allowed_mentions=discord.AllowedMentions.none())
+            return
+
+        if target_user != ctx.author:
+            try:
+                is_owner = await _bot.is_owner(ctx.author)
+            except Exception:
+                is_owner = False
+
+            if not is_owner:
+                await ctx.send(
+                    "You can only view your own profile.",
+                    allowed_mentions=discord.AllowedMentions.none())
+                return
+
+        # Gather config for the target user
+        user_config = _user_config_manager.get_user_config(target_user.id)
         
+        # Get additional info
+        model = user_config["model"]
+        credit = user_config.get("credit", 0)
+        access_level = user_config.get("access_level", 0)
+        prompt = user_config["system_prompt"]
+
+        # Level description
+        level_desc = {
+            0: "Basic (Level 0)",
+            1: "Advanced (Level 1)", 
+            2: "Premium (Level 2)"
+        }.get(access_level, f"Unknown (Level {access_level})")
+
+        # Format display prompt
+        display_prompt = prompt[:500] + "...[truncated]" if len(prompt) > 500 else prompt
+
+        # Build profile display
+        lines = [
+            f"**👤 Profile for {target_user}:**",
+            f"🤖 **Current Model**: {model}",
+            f"💰 **Credit Balance**: {credit}",
+            f"🔑 **Access Level**: {level_desc}",
+            "📝 **System Prompt:**",
+            "```",
+            display_prompt,
+            "```"
+        ]
+
+        await ctx.send("\n".join(lines), allowed_mentions=discord.AllowedMentions.none())
+        return
+
+    # ---------- Handle `model` / `models` ----------
+    elif item in {"model", "models"}:
+        if _use_mongodb_auth:
+            # Get models with their details from MongoDB
+            all_models = _mongodb_store.list_all_models()
+            if all_models:
+                models_info = []
+                # Sort models by level (descending) and then by cost (descending)
+                sorted_models = sorted(all_models, 
+                                    key=lambda x: (-x.get("access_level", 0),  # Negative for descending level
+                                                 -x.get("credit_cost", 0),     # Negative for descending cost
+                                                 x.get("model_name", "")))     # Then by name ascending
+                
+                current_level = None
+                for model in sorted_models:
+                    model_name = model.get("model_name", "Unknown")
+                    credit_cost = model.get("credit_cost", 0)
+                    access_level = model.get("access_level", 0)
+                    level_names = {0: "Basic", 1: "Advanced", 2: "Premium"}
+                    level_name = level_names.get(access_level, f"Level {access_level}")
+                    
+                    # Add level header if level changed
+                    if current_level != access_level:
+                        models_info.append(f"\n**{level_name} Models:**")
+                        current_level = access_level
+                        
+                    models_info.append(f"• `{model_name}` - {credit_cost} credits")
+
+                lines = [
+                    "**Available AI Models:**",
+                    *models_info,
+                    "",
+                    "Use `;set model <model_name>` to change your model."
+                ]
+            else:
+                lines = ["No models found in database."]
+        else:
+            # Fallback for file mode
+            supported_models = _user_config_manager.get_supported_models()
+            models_list = "\n".join(f"• `{model}`" for model in sorted(supported_models))
+            lines = [
+                "**Supported AI Models:**",
+                models_list,
+                "",
+                "Use `;set model <model_name>` to change your model."
+            ]
+
+        await ctx.send("\n".join(lines), allowed_mentions=discord.AllowedMentions.none())
+
+    # ---------- Handle `auth` ----------
+    elif item == "auth":
+        try:
+            is_owner = await _bot.is_owner(ctx.author)
+        except Exception:
+            is_owner = False
+
+        if not is_owner:
+            await ctx.send(
+                "Only the bot owner can view the authorized users list.",
+                allowed_mentions=discord.AllowedMentions.none())
+            return
+
         if not _authorized_users:
-            await ctx.send("Authorized list is empty.", allowed_mentions=discord.AllowedMentions.none())
+            await ctx.send("Authorized users list is empty.", allowed_mentions=discord.AllowedMentions.none())
             return
 
         body = "\n".join(str(x) for x in sorted(_authorized_users))
         if len(body) > 1900:
-            # For MongoDB mode, create a temporary text with the list
             if _use_mongodb_auth:
                 import tempfile
                 with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
                     f.write("Authorized Users:\n")
                     f.write(body)
                     temp_path = f.name
-                
                 try:
-                    await ctx.send("List too long, sending as file.", 
-                                 allowed_mentions=discord.AllowedMentions.none(),
-                                 file=discord.File(temp_path, filename="authorized_users.txt"))
+                    await ctx.send(
+                        "Too long data, sending authorized_users.txt file.",
+                        allowed_mentions=discord.AllowedMentions.none(),
+                        file=discord.File(temp_path, filename="authorized_users.txt"))
                 finally:
                     Path(temp_path).unlink(missing_ok=True)
             else:
-                # File mode - use existing file
                 fp = _config.AUTHORIZED_STORE if _config.AUTHORIZED_STORE.exists() else None
                 if fp:
-                    await ctx.send("List too long, sending authorized.json file.", 
-                                 allowed_mentions=discord.AllowedMentions.none(), 
-                                 file=discord.File(fp))
+                    await ctx.send(
+                        "Too long data, sending authorized.json file.",
+                        allowed_mentions=discord.AllowedMentions.none(),
+                        file=discord.File(fp))
                 else:
-                    await ctx.send("List too long, authorized.json not found.", 
-                                 allowed_mentions=discord.AllowedMentions.none())
+                    await ctx.send(
+                        "Too long data, but no authorized.json file found.",
+                        allowed_mentions=discord.AllowedMentions.none())
         else:
-            await ctx.send(f"**Authorized Users:**\n{body}", allowed_mentions=discord.AllowedMentions.none())
-            
-    else:
-        await ctx.send(f"Unknown item '{item}'. Use: `config`, `model`, `models detailed` (owner), or `auth` (owner)", 
-                      allowed_mentions=discord.AllowedMentions.none())
+            await ctx.send(f"**Authorized users list:**\n{body}",
+                           allowed_mentions=discord.AllowedMentions.none())
 
+    else:
+        await ctx.send(
+            f"Unknown item {item}. Use `config`, `model`, `models detailed` (owner) or `auth` (owner).",
+            allowed_mentions=discord.AllowedMentions.none())
 # ------------------------------------------------------------------
 # AI Request Processing Function (used by queue)
 # ------------------------------------------------------------------
@@ -634,6 +847,37 @@ async def process_ai_request(request):
     message = request.message
     final_user_text = request.final_user_text
     
+    # Check if user has enough credits for the model
+    if _use_mongodb_auth:
+        user_model = _user_config_manager.get_user_model(message.author.id)
+        model_info = _mongodb_store.get_model_info(user_model)
+        
+        if model_info:
+            cost = model_info.get("credit_cost", 0)
+            access_level = model_info.get("access_level", 0)
+            
+            # Check user access level
+            user_config = _user_config_manager.get_user_config(message.author.id)
+            user_level = user_config.get("access_level", 0)
+            
+            if user_level < access_level:
+                await message.channel.send(
+                    f"❌ This model requires {access_level} access level. Your level: {user_level}",
+                    reference=message,
+                    allowed_mentions=discord.AllowedMentions.none()
+                )
+                return
+            
+            # Deduct credits
+            success, remaining = _mongodb_store.deduct_user_credit(message.author.id, cost)
+            if not success:
+                await message.channel.send(
+                    f"❌ Insufficient credits. This model costs {cost} credits per use.",
+                    reference=message,
+                    allowed_mentions=discord.AllowedMentions.none()
+                )
+                return
+
     # Store the user's message in memory first (before API call)
     if _memory_store:
         _memory_store.add_message(message.author.id, {"role": "user", "content": final_user_text})
@@ -664,7 +908,7 @@ async def process_ai_request(request):
 
     if not ok:
         await message.channel.send(
-            f"❌ [OpenAI PROXY ERROR] {resp}",
+            f"❌ [ERROR] {resp}",
             reference=message,
             allowed_mentions=discord.AllowedMentions.none()
         )
@@ -1029,7 +1273,8 @@ async def on_message(message: discord.Message):
 
     if not authorized:
         try:
-            await message.channel.send("You do not have permission to use this bot.", allowed_mentions=discord.AllowedMentions.none())
+            await message.channel.send("You do not have permission to use this bot.", 
+                                     allowed_mentions=discord.AllowedMentions.none())
         except Exception:
             logger.exception("Failed to send unauthorized message")
         return
@@ -1064,8 +1309,7 @@ async def on_message(message: discord.Message):
     final_user_text = (attachment_text + user_text).strip()
     if not final_user_text:
         await message.channel.send(
-            "Please send a message (mention me or DM me) with your question. "
-            "Example: mention me and ask 'explain Dijkstra algorithm briefly'.",
+            "Please send a message (mention me or DM me) with your question.",
             allowed_mentions=discord.AllowedMentions.none(),
         )
         return
@@ -1167,9 +1411,10 @@ def setup(bot: commands.Bot, call_api_module, config_module):
     bot.add_command(commands.Command(memory_cmd, name="memory", checks=[owner_check]))
     bot.add_command(commands.Command(clearmemory_cmd, name="clearmemory", checks=[owner_check]))
     
-    # NEW: Model management commands (owner only)
+    # Model management commands (owner only)
     bot.add_command(commands.Command(add_cmd, name="add", checks=[owner_check]))
     bot.add_command(commands.Command(remove_cmd, name="remove", checks=[owner_check]))
+    bot.add_command(commands.Command(edit_cmd, name="edit", checks=[owner_check]))
 
     # ------------------------------------------------------------------
     # Register on_message listener if not already present

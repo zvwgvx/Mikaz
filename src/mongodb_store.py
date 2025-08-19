@@ -19,7 +19,7 @@ class MongoDBStore:
         self.database_name = database_name
         self.client: Optional[MongoClient] = None
         self.db = None
-        self.tokenizer = tiktoken.encoding_for_model("gpt-4")
+        self.tokenizer = tiktoken.encoding_for_model("gpt-oss-120b")
         
         # Collection names
         self.COLLECTIONS = {
@@ -83,17 +83,15 @@ class MongoDBStore:
             # Check if models collection exists and has data
             count = self.db[self.COLLECTIONS['models']].count_documents({})
             if count == 0:
-                # Insert default models
                 default_models = [
-                    {"model_name": "o3-mini", "created_at": datetime.utcnow(), "is_default": True},
-                    {"model_name": "gpt-4.1", "created_at": datetime.utcnow(), "is_default": True},
-                    {"model_name": "gpt-5", "created_at": datetime.utcnow(), "is_default": True},
-                    {"model_name": "gpt-oss-20b", "created_at": datetime.utcnow(), "is_default": True},
-                    {"model_name": "gpt-oss-120b", "created_at": datetime.utcnow(), "is_default": True},
+                    {"model_name": "gemini-2.5-flash", "created_at": datetime.utcnow(), "is_default": True, "credit_cost": 10, "access_level": 0},
+                    {"model_name": "gemini-2.5-pro", "created_at": datetime.utcnow(), "is_default": True, "credit_cost": 50, "access_level": 0},
+                    {"model_name": "gpt-3.5-turbo", "created_at": datetime.utcnow(), "is_default": True, "credit_cost": 200, "access_level": 0},
+                    {"model_name": "gpt-5", "created_at": datetime.utcnow(), "is_default": True, "credit_cost": 700, "access_level": 1},
                 ]
                 
                 self.db[self.COLLECTIONS['models']].insert_many(default_models)
-                logger.info("Default models initialized in MongoDB")
+                logger.info("Default models with credit system initialized in MongoDB")
         except Exception as e:
             logger.exception(f"Error initializing default models: {e}")
     
@@ -117,33 +115,36 @@ class MongoDBStore:
             # Return default models as fallback
             return {"o3-mini", "gpt-4.1", "gpt-5", "gpt-oss-20b", "gpt-oss-120b"}
     
-    def add_supported_model(self, model_name: str) -> tuple[bool, str]:
-        """
-        Add a new supported model
-        Returns: (success: bool, message: str)
-        """
+    def add_supported_model(self, model_name: str, credit_cost: int = 1, access_level: int = 0) -> tuple[bool, str]:
+        """Add a new supported model with credit cost and access level"""
         try:
             model_name = model_name.strip()
             if not model_name:
                 return False, "Model name cannot be empty"
-            
-            # Check if model already exists
+                
+            if credit_cost < 0:
+                return False, "Credit cost cannot be negative"
+                
+            if access_level not in [0, 1, 2]:
+                return False, "Access level must be 0, 1, or 2"
+                
+            # Check if model exists
             existing = self.db[self.COLLECTIONS['models']].find_one({"model_name": model_name})
             if existing:
                 return False, f"Model '{model_name}' already exists"
-            
-            # Add new model
+                
+            # Add new model with attributes
             result = self.db[self.COLLECTIONS['models']].insert_one({
                 "model_name": model_name,
                 "created_at": datetime.utcnow(),
-                "is_default": False
+                "is_default": False,
+                "credit_cost": credit_cost,
+                "access_level": access_level
             })
             
             if result.inserted_id:
-                return True, f"Successfully added model '{model_name}'"
-            else:
-                return False, "Failed to add model to database"
-                
+                return True, f"Successfully added model '{model_name}' (Cost: {credit_cost}, Level: {access_level})"
+            return False, "Failed to add model to database"
         except Exception as e:
             logger.exception(f"Error adding model {model_name}: {e}")
             return False, f"Database error: {e}"
@@ -210,6 +211,44 @@ class MongoDBStore:
             logger.exception(f"Error listing all models: {e}")
             return []
     
+    def edit_supported_model(self, model_name: str, credit_cost: int = None, access_level: int = None) -> tuple[bool, str]:
+        """Edit an existing model's settings"""
+        try:
+            model_name = model_name.strip()
+            if not model_name:
+                return False, "Model name cannot be empty"
+                
+            # Check if model exists
+            existing = self.db[self.COLLECTIONS['models']].find_one({"model_name": model_name})
+            if not existing:
+                return False, f"Model '{model_name}' does not exist"
+                
+            # Prepare update data
+            update_data = {"updated_at": datetime.utcnow()}
+            if credit_cost is not None:
+                if credit_cost < 0:
+                    return False, "Credit cost cannot be negative"
+                update_data["credit_cost"] = credit_cost
+                
+            if access_level is not None:
+                if access_level not in [0, 1, 2]:
+                    return False, "Access level must be 0, 1, or 2"
+                update_data["access_level"] = access_level
+                
+            # Update the model
+            result = self.db[self.COLLECTIONS['models']].update_one(
+                {"model_name": model_name},
+                {"$set": update_data}
+            )
+            
+            if result.modified_count > 0:
+                return True, f"Successfully updated model '{model_name}'"
+            return False, "No changes were made"
+            
+        except Exception as e:
+            logger.exception(f"Error editing model {model_name}: {e}")
+            return False, f"Database error: {e}"
+
     # =====================================
     # USER CONFIG METHODS (Updated to use database models)
     # =====================================
@@ -220,30 +259,30 @@ class MongoDBStore:
             result = self.db[self.COLLECTIONS['user_config']].find_one({"user_id": user_id})
             if result:
                 # Validate that the user's model still exists
-                user_model = result.get("model", "gpt-5")
+                user_model = result.get("model", "gemini-2.5-flash")
                 if not self.model_exists(user_model):
                     # Model no longer exists, fallback to first available model
                     supported_models = self.get_supported_models()
                     if supported_models:
-                        user_model = next(iter(supported_models))  # Get first model
-                        # Update user's config with valid model
+                        user_model = next(iter(supported_models))
                         self.set_user_config(user_id, model=user_model)
                     else:
-                        user_model = "gpt-5"  # Ultimate fallback
-                
-                return {
-                    "model": user_model,
-                    "system_prompt": result.get("system_prompt", "Bạn tên là Mikaz (nữ), nói tiếng việt")
-                }
-            else:
-                # Return default config
-                return {
-                    "model": "gpt-5", 
-                    "system_prompt": "Bạn tên là Mikaz (nữ), nói tiếng việt"
-                }
+                        user_model = "gemini-2.5-flash"  # Ultimate fallback
+
+            return {
+                "model": user_model,
+                "system_prompt": result.get("system_prompt", "Tên của bạn là Mikaz (nữ), nói tiếng việt"),
+                "credit": result.get("credit", 0),
+                "access_level": result.get("access_level", 0)
+            }
         except Exception as e:
             logger.exception(f"Error getting user config for {user_id}: {e}")
-            return {"model": "gpt-5", "system_prompt": "Bạn tên là Mikaz (nữ), nói tiếng việt"}
+            return {
+                "model": "gemini-2.5-flash",
+                "system_prompt": "Tên của bạn là Mikaz (nữ), nói tiếng việt",
+                "credit": 0,
+                "access_level": 0
+            }
     
     def set_user_config(self, user_id: int, model: Optional[str] = None, system_prompt: Optional[str] = None) -> bool:
         """Set user configuration"""
@@ -407,6 +446,75 @@ class MongoDBStore:
         except Exception as e:
             logger.exception(f"Error checking authorization for user {user_id}: {e}")
             return False
+    
+    # =====================================
+    # USER LEVEL AND CREDIT METHODS (NEW)
+    # =====================================
+    
+    def set_user_level(self, user_id: int, level: int) -> bool:
+        """Set user access level"""
+        try:
+            if level not in [0, 1, 2]:
+                return False
+                
+            result = self.db[self.COLLECTIONS['user_config']].update_one(
+                {"user_id": user_id},
+                {
+                    "$set": {
+                        "access_level": level,
+                        "updated_at": datetime.utcnow()
+                    },
+                    "$setOnInsert": {
+                        "user_id": user_id,
+                        "created_at": datetime.utcnow()
+                    }
+                },
+                upsert=True
+            )
+            return True
+        except Exception as e:
+            logger.exception(f"Error setting level for user {user_id}: {e}")
+            return False
+    
+    def add_user_credit(self, user_id: int, amount: int) -> tuple[bool, int]:
+        """Add credit to user balance. Returns (success, new_balance)"""
+        try:
+            result = self.db[self.COLLECTIONS['user_config']].find_one_and_update(
+                {"user_id": user_id},
+                {
+                    "$inc": {"credit": amount},
+                    "$setOnInsert": {
+                        "user_id": user_id,
+                        "created_at": datetime.utcnow()
+                    }
+                },
+                upsert=True,
+                return_document=True
+            )
+            return True, result.get("credit", 0)
+        except Exception as e:
+            logger.exception(f"Error adding credit for user {user_id}: {e}")
+            return False, 0
+    
+    def deduct_user_credit(self, user_id: int, amount: int) -> tuple[bool, int]:
+        """Deduct credit from user balance. Returns (success, remaining_balance)"""
+        try:
+            result = self.db[self.COLLECTIONS['user_config']].find_one_and_update(
+                {
+                    "user_id": user_id,
+                    "credit": {"$gte": amount}
+                },
+                {
+                    "$inc": {"credit": -amount}
+                },
+                return_document=True
+            )
+            if result:
+                return True, result.get("credit", 0)
+            return False, 0
+        except Exception as e:
+            logger.exception(f"Error deducting credit for user {user_id}: {e}")
+            return False, 0
 
 # Singleton instance
 _mongodb_store: Optional[MongoDBStore] = None

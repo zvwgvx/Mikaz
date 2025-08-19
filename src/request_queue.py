@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # coding: utf-8
-# request_queue.py - Hệ thống queue xử lý request với priority cho owner
+# request_queue.py - Request queue system with owner priority handling
 
 import asyncio
 import logging
@@ -28,11 +28,11 @@ class QueuedRequest:
         return self.timestamp < other.timestamp
 
 class RequestQueue:
-    """Hệ thống queue xử lý request AI với priority cho owner"""
+    """Request queue system for AI processing with owner priority"""
     
     def __init__(self):
-        self._queue = None  # Sẽ được khởi tạo lazy khi cần thiết
-        self._processing_users: Set[int] = set()  # Users currently being processed
+        self._queue = None  # Will be lazy initialized when needed
+        self._processing_users: Set[int] = set()
         self._user_last_request: Dict[int, float] = {}  # Rate limiting
         self._is_processing = False
         self._worker_task: Optional[asyncio.Task] = None
@@ -73,7 +73,6 @@ class RequestQueue:
         Add a request to queue
         Returns: (success: bool, message: str)
         """
-        # Đảm bảo queue được khởi tạo trong đúng event loop
         self._ensure_queue_initialized()
         
         user_id = message.author.id
@@ -81,15 +80,15 @@ class RequestQueue:
         
         # Check if user already has a request being processed
         if user_id in self._processing_users:
-            return False, "⏳ Bạn đang có một request đang được xử lý. Vui lòng đợi hoàn thành."
+            return False, "⏳ You have a request being processed. Please wait."
         
         # Rate limiting (except for owner)
         is_owner = await self.is_owner(message.author)
         if not is_owner:
             last_request = self._user_last_request.get(user_id, 0)
-            if current_time - last_request < 5.0:  # 5 second cooldown
+            if current_time - last_request < 10.0:  # 10 second cooldown
                 remaining = 5.0 - (current_time - last_request)
-                return False, f"⏰ Vui lòng đợi {remaining:.1f}s trước khi gửi request tiếp theo."
+                return False, f"⏰ Please wait {remaining:.1f}s before sending another request."
         
         # Create request
         request = QueuedRequest(
@@ -113,11 +112,11 @@ class RequestQueue:
         processing_count = len(self._processing_users)
         
         if is_owner:
-            status_msg = "👑 Request của Owner được ưu tiên xử lý..."
+            status_msg = "👑 Owner request prioritized for processing..."
         elif queue_size == 1 and processing_count == 0:
-            status_msg = "🤖 Đang xử lý request của bạn..."
+            status_msg = "🤖 Processing your request..."
         else:
-            status_msg = f"📋 Request của bạn đã được thêm vào queue. Vị trí: {queue_size}, Đang xử lý: {processing_count}"
+            status_msg = f"📋 Request added to queue. Position: {queue_size}, Processing: {processing_count}"
         
         return True, status_msg
     

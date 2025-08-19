@@ -2,6 +2,7 @@
 import logging
 import os
 from openai import OpenAI
+from google import genai
 import load_config  # changed from relative import to absolute import
 
 logger = logging.getLogger("discord-openai-proxy.call_api")
@@ -13,57 +14,138 @@ except TypeError:
     # fallback constructor if SDK signature differs
     openai_client = OpenAI(api_key=load_config.OPENAI_API_KEY)
 
+# Initialize Gemini client
+gemini_client = None
+GEMINI_AVAILABLE = False  # New flag to track availability
+GEMINI_ERROR = None  # Store error message
 
-def call_openai_proxy(messages, model=None):
-    """Call OpenAI chat completions via proxy client.
-    Args:
-        messages: List of message dictionaries for the conversation
-        model: Model to use (optional, defaults to config model)
-    Returns (ok: bool, content_or_error: str)
-    Keeps behavior same as original code.
-    """
-    # Use provided model or fall back to config default
-    selected_model = model or load_config.OPENAI_MODEL
-    
+try:
+    # First check if key exists
+    if not hasattr(load_config, 'GEMINI_API_KEY') or not load_config.GEMINI_API_KEY:
+        GEMINI_ERROR = "Gemini API key not found in config"
+        logger.warning(GEMINI_ERROR)
+    else:
+        try:
+            # Then try to import and initialize
+            from google import genai
+            os.environ['GEMINI_API_KEY'] = load_config.GEMINI_API_KEY
+            gemini_client = genai.Client()
+            GEMINI_AVAILABLE = True
+            logger.info("Gemini client initialized successfully")
+        except ImportError:
+            GEMINI_ERROR = "Google GenAI library not installed. Please run: pip install google-generativeai"
+            logger.error(GEMINI_ERROR)
+        except Exception as e:
+            GEMINI_ERROR = f"Error initializing Gemini client: {e}"
+            logger.error(GEMINI_ERROR)
+except Exception as e:
+    GEMINI_ERROR = f"Unexpected error checking Gemini configuration: {e}"
+    logger.error(GEMINI_ERROR)
+
+
+def is_gemini_model(model_name: str) -> bool:
+    """Check if the model is a Gemini model"""
+    return model_name.startswith("gemini-")
+
+
+def convert_messages_to_gemini_format(messages):
+    """Convert OpenAI format messages to Gemini format"""
     try:
-        resp = openai_client.chat.completions.create(
-            model=selected_model,
-            messages=messages,
-        )
+        # Gemini expects a single content string, so we'll combine all messages
+        # Skip system messages or incorporate them into the user content
+        user_messages = []
+        system_content = ""
+
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+
+            if role == "system":
+                system_content = content
+            elif role == "user":
+                if system_content:
+                    user_messages.append(f"System: {system_content}\n\nUser: {content}")
+                    system_content = ""  # Only use system prompt once
+                else:
+                    user_messages.append(content)
+            elif role == "assistant":
+                user_messages.append(f"Assistant: {content}")
+
+        # Combine all messages into a single content string
+        combined_content = "\n\n".join(user_messages)
+        return combined_content
+
     except Exception as e:
-        logger.exception("Error calling OpenAI proxy")
-        return False, f"OpenAI proxy connection error: {e}"
+        logger.exception("Error converting messages to Gemini format")
+        # Fallback - just use the last user message
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                return msg.get("content", "")
+        return "Hello"
+
+
+def call_gemini_api(messages, model):
+    """Call Gemini API with the given messages and model"""
+    if not gemini_client:
+        return False, "Gemini client not initialized"
 
     try:
-        try:
-            choice0 = resp.choices[0]
-        except Exception:
-            choice0 = None
+        # Convert OpenAI format to Gemini format
+        content = convert_messages_to_gemini_format(messages)
 
-        if choice0 is None:
-            return True, str(resp)
+        # Call Gemini API
+        response = gemini_client.models.generate_content(
+            model=model,
+            contents=content
+        )
 
-        content = None
-        if hasattr(choice0, "message"):
-            m = choice0.message
-            if isinstance(m, dict):
-                content = m.get("content")
-            else:
-                content = getattr(m, "content", None)
+        # Extract the response text
+        response_text = response.text if hasattr(response, 'text') else str(response)
+        return True, response_text
+
+    except Exception as e:
+        logger.exception(f"Error calling Gemini API: {e}")
+        return False, str(e)
+
+
+def is_model_available(model: str) -> tuple[bool, str]:
+    """Check if a model is available for use"""
+    if is_gemini_model(model):
+        if not GEMINI_AVAILABLE:
+            return False, GEMINI_ERROR or "Gemini API is not available"
+        return True, ""
+    return True, ""  # Non-Gemini models are assumed available
+
+
+def call_openai_proxy(messages, model="gpt-3.5-turbo"):
+    """
+    Call OpenAI API or Gemini API based on model type
+    """
+    try:
+        # Check model availability first
+        available, error = is_model_available(model)
+        if not available:
+            return False, error
+
+        if is_gemini_model(model):
+            # Use Gemini API
+            return call_gemini_api(messages, model)
         else:
-            if isinstance(choice0, dict):
-                content = choice0.get("message", {}).get("content") if choice0.get("message") else choice0.get("text")
-            else:
-                content = getattr(choice0, "text", None)
+            # Use OpenAI API (existing logic)
+            response = openai_client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=4000,
+                temperature=0.7,
+                timeout=load_config.REQUEST_TIMEOUT
+            )
 
-        if content is None:
-            return True, str(choice0)
+            choice = response.choices[0]
+            if choice.finish_reason == "length":
+                logger.warning(f"Response truncated due to max_tokens limit for model {model}")
 
-        return True, content
+            return True, choice.message.content
 
-    except Exception:
-        logger.exception("Failed to parse response from OpenAI proxy")
-        try:
-            return True, str(resp)
-        except Exception:
-            return False, "Unable to read response from OpenAI proxy"
+    except Exception as e:
+        logger.exception(f"Error calling API for model {model}: {e}")
+        return False, str(e)

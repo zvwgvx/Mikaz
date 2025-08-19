@@ -8,9 +8,8 @@ import load_config
 
 logger = logging.getLogger("discord-openai-proxy.memory_store")
 
-# Đảm bảo thư mục config tồn tại - đi lên 1 cấp từ src/ rồi vào config/
+# Remove auto-creation and use parent directory directly
 CONFIG_DIR = Path(__file__).parent.parent / "config"
-CONFIG_DIR.mkdir(exist_ok=True)
 
 TOKENIZER = tiktoken.encoding_for_model("gpt-4")
 
@@ -30,8 +29,6 @@ class MemoryStore:
         else:
             # File mode (legacy)
             self.path = Path(path) if path else (CONFIG_DIR / 'memory.json')
-            # Đảm bảo thư mục cha tồn tại
-            self.path.parent.mkdir(parents=True, exist_ok=True)
             
             # {user_id: deque([msg, ...])}
             self._cache: Dict[int, deque[Msg]] = {}
@@ -69,9 +66,7 @@ class MemoryStore:
             return
             
         try:
-            # Đảm bảo thư mục tồn tại trước khi ghi
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            
+            # Remove auto-creation of directory
             tmp = self.path.with_suffix('.tmp')
             tmp.write_text(json.dumps(
                 {str(k): list(v) for k, v in self._cache.items()},

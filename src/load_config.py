@@ -30,26 +30,26 @@ ENV_FILE = BASE_DIR / "config.json"
 def _load_json_file(path: Path) -> Dict[str, Any]:
     """Return an empty dict if file missing; raise warning if JSON bad."""
     if not path.exists():
-        logger.warning(f"File không tồn tại: {path}")
+        logger.warning(f"File not found: {path}")
         return {}
     try:
         content = path.read_text(encoding="utf-8")
         return json.loads(content) if content.strip() else {}
     except json.JSONDecodeError as exc:
-        logger.error(f"format JSON sai {path}:\n{exc}")
+        logger.error(f"Invalid JSON format in {path}:\n{exc}")
         return {}
     except Exception as exc:
-        logger.exception(f"Error đọc {path}: {exc}")
+        logger.exception(f"Error reading {path}: {exc}")
         return {}
 
 def _int_or_default(val: Any, default: int, name: str) -> int:
     if val is None:
-        logger.warning(f"{name} không xác định trong config; dùng mặc định {default}")
+        logger.warning(f"{name} not defined in config; using default {default}")
         return default
     try:
         return int(val)
     except (ValueError, TypeError):
-        logger.error(f"{name} phải là số nguyên; tạo {default}")
+        logger.error(f"{name} must be an integer; using {default}")
         return default
 
 # --------------------------------------------------------------------
@@ -64,6 +64,9 @@ DISCORD_TOKEN = env_data.get("DISCORD_TOKEN")
 OPENAI_API_KEY = env_data.get("OPENAI_API_KEY")
 OPENAI_API_BASE = env_data.get("OPENAI_API_BASE")
 OPENAI_MODEL = env_data.get("OPENAI_MODEL")
+
+# Gemini API configuration (NEW)
+GEMINI_API_KEY = env_data.get("GEMINI_API_KEY")
 
 # MongoDB configuration
 MONGODB_CONNECTION_STRING = env_data.get("MONGODB_CONNECTION_STRING")
@@ -81,19 +84,25 @@ MEMORY_MAX_TOKENS = _int_or_default(env_data.get("MEMORY_MAX_TOKENS"), 2500, "ME
 # --------------------------------------------------------------------
 if DISCORD_TOKEN is None or OPENAI_API_KEY is None:
     raise RuntimeError(
-        "DISCORD_TOKEN và OPENAI_API_KEY phải được khai báo trong config.json."
+        "Both DISCORD_TOKEN and OPENAI_API_KEY must be defined in config.json."
     )
 
 # MongoDB validation
 if USE_MONGODB and not MONGODB_CONNECTION_STRING:
     raise RuntimeError(
-        "USE_MONGODB được bật nhưng MONGODB_CONNECTION_STRING không được cung cấp trong config.json."
+        "USE_MONGODB is enabled but MONGODB_CONNECTION_STRING is not provided in config.json."
     )
 
 # Supported models
 SUPPORTED_MODELS = {"gpt-oss-20b", "gpt-oss-120b", "gpt-5", "o3-mini", "gpt-4.1"}
 if OPENAI_MODEL and OPENAI_MODEL not in SUPPORTED_MODELS:
-    logger.warning(f"MODEL {OPENAI_MODEL} không được liệt kê; nên giám sát sau này.")
+    logger.warning(f"MODEL {OPENAI_MODEL} not listed; should be monitored.")
+
+# Gemini API validation (optional)
+if GEMINI_API_KEY:
+    logger.info("Gemini API key found - Gemini models will be available")
+else:
+    logger.warning("Gemini API key not found - Gemini models will not be available")
 
 # --------------------------------------------------------------------
 # Initialize MongoDB if enabled
