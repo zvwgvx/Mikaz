@@ -128,15 +128,14 @@ def call_openai_proxy(messages, model="gpt-3.5-turbo"):
             return False, error
 
         if is_gemini_model(model):
-            # Use Gemini API
+            # Let convert_messages_to_gemini_format handle the conversion
             return call_gemini_api(messages, model)
         else:
-            # Use OpenAI API (existing logic)
+            # Use standard OpenAI format
             response = openai_client.chat.completions.create(
                 model=model,
                 messages=messages,
-                max_tokens=4000,
-                temperature=0.7,
+                temperature=1.1,
                 timeout=load_config.REQUEST_TIMEOUT
             )
 

@@ -847,7 +847,7 @@ async def process_ai_request(request):
     message = request.message
     final_user_text = request.final_user_text
     
-    # Check if user has enough credits for the model
+    # Get user model info first
     if _use_mongodb_auth:
         user_model = _user_config_manager.get_user_model(message.author.id)
         model_info = _mongodb_store.get_model_info(user_model)
@@ -867,74 +867,71 @@ async def process_ai_request(request):
                     allowed_mentions=discord.AllowedMentions.none()
                 )
                 return
-            
-            # Deduct credits
-            success, remaining = _mongodb_store.deduct_user_credit(message.author.id, cost)
-            if not success:
-                await message.channel.send(
-                    f"❌ Insufficient credits. This model costs {cost} credits per use.",
-                    reference=message,
-                    allowed_mentions=discord.AllowedMentions.none()
-                )
-                return
 
-    # Store the user's message in memory first (before API call)
-    if _memory_store:
-        _memory_store.add_message(message.author.id, {"role": "user", "content": final_user_text})
-
-    # Build payload for OpenAI với model và system prompt riêng của user
-    user_system_message = _user_config_manager.get_user_system_message(message.author.id)
-    user_model = _user_config_manager.get_user_model(message.author.id)
-    
-    user_memory = _memory_store.get_user_messages(message.author.id) if _memory_store else []
-    payload_messages = [user_system_message] + user_memory + [{"role": "user", "content": final_user_text}]
-
-    # ------------------------------------------------------------------
-    # Call OpenAI với model riêng của user
-    # ------------------------------------------------------------------
     try:
-        # Send typing indicator
+        # Build payload based on model type
+        user_system_message = _user_config_manager.get_user_system_message(message.author.id)
+        user_model = _user_config_manager.get_user_model(message.author.id)
+        user_memory = _memory_store.get_user_messages(message.author.id) if _memory_store else []
+
+        # Build payload based on whether it's a Gemini model or not
+        if _call_api.is_gemini_model(user_model):
+            # For Gemini: Convert messages before sending to API
+            payload_messages = [user_system_message] + user_memory + [{"role": "user", "content": final_user_text}]
+        else:
+            # For OpenAI: Use standard format
+            payload_messages = [user_system_message] + user_memory + [{"role": "user", "content": final_user_text}]
+
+        # Call API with timeout handling
         async with message.channel.typing():
             loop = asyncio.get_running_loop()
             ok, resp = await loop.run_in_executor(None, _call_api.call_openai_proxy, payload_messages, user_model)
+
+            if ok:
+                # Only deduct credits if API call succeeded
+                if _use_mongodb_auth and model_info:
+                    success, remaining = _mongodb_store.deduct_user_credit(message.author.id, cost)
+                    if not success:
+                        await message.channel.send(
+                            f"❌ Insufficient credits. This model costs {cost} credits per use.",
+                            reference=message,
+                            allowed_mentions=discord.AllowedMentions.none()
+                        )
+                        return
+                
+                # Store messages in memory after successful API call
+                # Store using OpenAI format for consistency in storage
+                if _memory_store:
+                    _memory_store.add_message(message.author.id, {"role": "user", "content": final_user_text})
+                    _memory_store.add_message(message.author.id, {"role": "assistant", "content": resp})
+
+                # Format and send response
+                reply = (resp or "").strip() or "(no response from AI)"
+                reply = convert_latex_to_discord(reply)
+                await send_long_message_with_reference(message.channel, reply, message, _config.MAX_MSG)
+                
+            else:
+                # Handle timeout or other API errors
+                if "timeout" in str(resp).lower():
+                    await message.channel.send(
+                        "❌ Request timed out. Please try again.",
+                        reference=message,
+                        allowed_mentions=discord.AllowedMentions.none()
+                    )
+                else:
+                    await message.channel.send(
+                        f"❌ API Error: {resp}",
+                        reference=message,
+                        allowed_mentions=discord.AllowedMentions.none()
+                    )
+
     except Exception as e:
-        logger.exception("Error calling openai proxy async")
+        logger.exception("Error in request processing")
         await message.channel.send(
             f"❌ Internal error: {e}",
             reference=message,
             allowed_mentions=discord.AllowedMentions.none()
         )
-        return
-
-    if not ok:
-        await message.channel.send(
-            f"❌ [ERROR] {resp}",
-            reference=message,
-            allowed_mentions=discord.AllowedMentions.none()
-        )
-        return
-
-    reply = (resp or "").strip() or "(no response from AI)"
-
-    # ------------------------------------------------------------------
-    # Convert LaTeX symbols to Discord-friendly format
-    # ------------------------------------------------------------------
-    reply = convert_latex_to_discord(reply)
-
-    # ------------------------------------------------------------------
-    # Store assistant reply in memory
-    # ------------------------------------------------------------------
-    if _memory_store:
-        _memory_store.add_message(message.author.id, {"role": "assistant", "content": reply})
-
-    # ------------------------------------------------------------------
-    # Send reply to Discord with reference to original message
-    # ------------------------------------------------------------------
-    try:
-        await send_long_message_with_reference(message.channel, reply, message, _config.MAX_MSG)
-    except Exception:
-        logger.exception("Error sending reply to Discord")
-
 
 # ------------------------------------------------------------------
 # Fixed Message formatting helpers with proper table handling
